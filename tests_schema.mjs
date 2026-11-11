@@ -5,7 +5,7 @@ await db.exec(`
 create role anon; create role authenticated; create role service_role;
 create schema auth; create function auth.uid() returns uuid language sql as $$ select null::uuid $$;
 `);
-try{ await db.exec(fs.readFileSync('/home/claude/handoff/schema.sql','utf8')); console.log('SCHEMA OK'); }catch(e){ console.log('SCHEMA ERR',e.message); process.exit(1); }
+try{ await db.exec(fs.readFileSync(new URL('./schema.sql', import.meta.url),'utf8')); console.log('SCHEMA OK'); }catch(e){ console.log('SCHEMA ERR',e.message); process.exit(1); }
 const q=async(s,p)=> (await db.query(s,p)).rows;
 const site=(await q(`insert into sites(slug,name) values('mk','MK') returning id`))[0].id;
 await db.exec(`insert into site_countries select '${site}',id from countries`);

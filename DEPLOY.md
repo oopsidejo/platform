@@ -4,7 +4,7 @@
 ارفع كل الملفات والمجلدات (src, public, test, migrations, reference) فوق القديمة.
 
 ## 2) Supabase
-1. SQL Editor: شغّل `schema.sql` (إذا ما شغّلته بعد)، ثم شغّل `migrations/v1.3.sql` (آمن حتى لو شغّلته مرتين).
+1. SQL Editor: شغّل `schema.sql` (إذا ما شغّلته بعد)، ثم شغّل `migrations/v1.3.sql` ثم `migrations/v1.4.sql` (فهارس للسرعة — كلها آمنة حتى لو شغّلتها مرتين).
 2. Authentication → Users → Add user (إيميلك + كلمة سر + Auto Confirm) ثم أوامر الأدمن والموقع.
 3. Storage → New bucket → الاسم `media` → فعّل Public.
 4. انسخ من Project Settings:

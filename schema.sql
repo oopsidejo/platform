@@ -53,10 +53,11 @@ create table orders(id uuid primary key default gen_random_uuid(), order_no bigi
   area text, address text, payment_method text not null references payment_methods(id), currency text not null, fx_rate numeric not null default 1,
   subtotal_jod numeric not null, shipping_jod numeric not null, discount_jod numeric not null default 0, total_jod numeric not null, coupon_code text, customer_note text, tier_discount_jod numeric not null default 0, flags text[] not null default '{}', assignee uuid, ref_code text,
   status_id uuid references order_statuses(id), note text, utm jsonb, created_at timestamptz not null default now());
-create index on orders(site_id,created_at desc); create index on orders(status_id);
+create index on orders(site_id,created_at desc); create index on orders(status_id); create index if not exists orders_phone9_idx on orders(right(phone,9));
 create table order_items(id uuid primary key default gen_random_uuid(), order_id uuid not null references orders(id) on delete cascade, product_id uuid references products(id) on delete set null,
   name text not null, options_text text, qty int not null check(qty>0), unit_price_jod numeric not null);
 create table order_status_history(id uuid primary key default gen_random_uuid(), order_id uuid not null references orders(id) on delete cascade, status_id uuid references order_statuses(id), by_name text, created_at timestamptz not null default now());
+create index if not exists order_items_order_idx on order_items(order_id); create index if not exists order_status_history_order_idx on order_status_history(order_id);
 create table order_deliveries(order_id uuid primary key references orders(id) on delete cascade, courier_id uuid references couriers(id), tracking_no text, cost_jod numeric not null default 0,
   status text not null default 'assigned' check(status in('assigned','picked','delivered','failed')), failed_reason text, settled boolean not null default false, settled_at timestamptz, assigned_at timestamptz not null default now());
 

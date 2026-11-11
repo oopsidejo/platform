@@ -8,6 +8,8 @@ import crypto from 'node:crypto';
 import { loadState, applySync, can, page } from './live.js';
 
 const env = process.env;
+// عمود date يرجع كنص YYYY-MM-DD (بدون تحويل لمنطقة زمنية → لا ينزاح التاريخ يوماً)
+pg.types.setTypeParser(1082, v => v);
 const pool = new pg.Pool({
   connectionString: env.DATABASE_URL,
   ssl: env.DATABASE_SSL === 'false' ? false : { rejectUnauthorized: false },
@@ -20,7 +22,9 @@ export function build() {
   const app = Fastify({ logger: env.NODE_ENV !== 'test' || !!env.DEBUG_ERR, trustProxy: true, bodyLimit: 200_000 });
   const origins = (env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
   app.register(cors, { origin: origins.length ? origins : true });
-  app.register(rateLimit, { global: true, max: 120, timeWindow: '1 minute' });
+  app.register(rateLimit, { global: true, max: +(env.RL_GLOBAL || 300), timeWindow: '1 minute' });
+  // مهم: تعريف المسارات بعد اكتمال تحميل rate-limit (وإلا لا يُطبَّق أي حد على أي مسار)
+  app.after(() => {
 
   const strict = { config: { rateLimit: { max: +(env.RL_WRITE || 10), timeWindow: '1 minute' } } };
   const fail = (reply, msg, code = 400) => { reply.code(code); return { ok: false, error: msg }; };
@@ -28,10 +32,23 @@ export function build() {
   const dbErr = (reply, e) => {
     const m = String(e.message || '');
     if (/[؀-ۿ]/.test(m)) return fail(reply, m);
-    if (e.code === '23505') return fail(reply, 'قيمة مكررة: ' + (/slug/.test(m) ? 'الرابط المختصر مستخدم لمنتج أو موقع آخر' : /code/.test(m) ? 'كود الكوبون مستخدم' : /domain/.test(m) ? 'الدومين مستخدم لموقع آخر' : 'موجودة مسبقاً'));
-    if (e.code === '23503') return fail(reply, 'لا يمكن الحذف: العنصر مرتبط ببيانات أخرى');
+    if (e.code === '23505') return fail(reply, 'قيمة مكررة: ' + (/slug/.test(m) ? 'الرابط المختصر مستخدم لمنتج أو موقع آخر' : /code/.test(m) ? 'كود الكوبون مستخدم' : /domain/.test(m) ? 'الدومين مستخدم لموقع آخر' : /subscribers/.test(m) ? 'رقم المشترك موجود مسبقاً' : 'موجودة مسبقاً'));
+    if (e.code === '23503') return fail(reply, 'لا يمكن الحذف: العنصر مرتبط ببيانات أخرى (طلبات أو دول). حدّث الصفحة للتراجع');
+    if (e.code === '22P02' || e.code === '23502' || e.code === '23514') { app.log.warn({ e: m }, 'bad data'); return fail(reply, 'قيمة غير صحيحة بأحد الحقول (تأكد من الأرقام والحقول المطلوبة)'); }
     app.log.error(e); return fail(reply, 'حدث خطأ، حاول مرة ثانية', 500);
   };
+  // أي خطأ غير متوقع: لا نكشف تفاصيل قاعدة البيانات للزائر
+  app.setErrorHandler((e, req, reply) => {
+    if (e.statusCode && e.statusCode < 500) { reply.code(e.statusCode); return reply.send({ ok: false, error: e.statusCode === 429 ? 'محاولات كثيرة، انتظر دقيقة وحاول مرة ثانية' : e.statusCode === 413 ? 'الملف أو البيانات أكبر من المسموح' : 'طلب غير صالح' }); }
+    if (e.code === '22P02' || e.code === '23503' || e.code === '23502') { reply.code(400); return reply.send({ ok: false, error: 'بيانات غير صحيحة' }); }
+    app.log.error(e); reply.code(500); return reply.send({ ok: false, error: 'حدث خطأ، حاول مرة ثانية' });
+  });
+  const str = (v, n) => String(v ?? '').trim().slice(0, n);
+  const isUuid = v => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(v || ''));
+  // UTM من الرابط: مفاتيح معروفة فقط ونصوص قصيرة (تُعرض بلوحة الإدارة)
+  const cleanUtm = u => { if (!u || typeof u !== 'object') return null; const o = {};
+    for (const k of ['source', 'medium', 'campaign', 'content', 'term', 'fbclid', 'ttclid']) if (u[k] !== undefined && u[k] !== null && String(u[k]).trim()) o[k] = String(u[k]).trim().slice(0, k.endsWith('clid') ? 300 : 120);
+    return Object.keys(o).length ? o : null; };
   const siteBy = async (key) => (await q(
     `select * from sites where active and (id::text=$1 or slug=$1 or domain=$1) limit 1`, [String(key || '').toLowerCase()]))[0];
 
@@ -66,13 +83,17 @@ export function build() {
     if (miss) return fail(reply, 'هذا الحقل مطلوب', 400);
     const s = await siteBy(b.site); if (!s) return fail(reply, 'الموقع غير موجود', 404);
     const payload = {
-      site_id: s.id, name: b.name, phone: b.phone, country_id: b.country_id, governorate_id: b.governorate_id,
-      area: b.area, address: b.address, payment_method: b.payment_method, currency: b.currency || 'JOD',
-      coupon: b.coupon || '', note: b.note || '', utm: b.utm || null,
-      items: Array.isArray(b.items) ? b.items.slice(0, 20).map(i => ({ product_id: i.product_id, qty: +i.qty || 1, options: i.options || [], upsell: !!i.upsell })) : [],
+      site_id: s.id, name: str(b.name, 80), phone: str(b.phone, 25), country_id: str(b.country_id, 60), governorate_id: str(b.governorate_id, 40),
+      area: str(b.area, 120), address: str(b.address, 300), payment_method: str(b.payment_method, 60), currency: str(b.currency, 8) || 'JOD',
+      coupon: str(b.coupon, 40), note: str(b.note, 1000), utm: cleanUtm(b.utm),
+      items: Array.isArray(b.items) ? b.items.slice(0, 20).map(i => ({ product_id: (i || {}).product_id, qty: Math.max(1, Math.min(999, Math.floor(+(i || {}).qty || 1))), options: Array.isArray((i || {}).options) ? i.options.slice(0, 10).map(o => ({ name: str((o || {}).name, 80), label: str((o || {}).label, 80) })) : [], upsell: !!(i || {}).upsell })) : [],
     };
+    if (!isUuid(payload.governorate_id) || payload.items.some(i => !isUuid(i.product_id))) return fail(reply, 'بيانات الطلب غير صحيحة');
     try {
       const r = (await q('select create_order($1::jsonb) r', [payload]))[0].r;
+      // تفاصيل محسوبة بالخادم لصفحة الشكر (الخصم والمجموع والمنتجات كما حُفظت فعلاً)
+      try { const d = (await q(`select o.subtotal_jod, o.discount_jod, (select jsonb_agg(jsonb_build_object('pid',i.product_id,'name',i.name,'opts',coalesce(i.options_text,''),'qty',i.qty,'unit',i.unit_price_jod) order by i.id) from order_items i where i.order_id=o.id) items from orders o where o.id=$1`, [r.order_id]))[0];
+        if (d) { r.subtotal_jod = +d.subtotal_jod; r.discount_jod = +d.discount_jod; r.items = (d.items || []).map(i => ({ ...i, unit: +i.unit })); } } catch (e) { app.log.warn({ e: e.message }, 'order details'); }
       sendCapi(s, r, b, req).catch(e => app.log.warn({ e: e.message }, 'capi failed'));
       return { ok: true, ...r };
     } catch (e) { return dbErr(reply, e); }
@@ -82,13 +103,13 @@ export function build() {
   app.post('/api/leads', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (req, reply) => {
     const b = req.body || {}; const s = await siteBy(b.site); if (!s) return fail(reply, 'الموقع غير موجود', 404);
     if (s.config && s.config.leads === false) return { ok: true };
-    try { await q('select save_lead($1,$2,$3,$4,$5)', [s.id, b.product_id || null, b.name, b.phone, b.utm || null]); return { ok: true }; }
+    try { await q('select save_lead($1,$2,$3,$4,$5)', [s.id, isUuid(b.product_id) ? b.product_id : null, str(b.name, 80), str(b.phone, 25), cleanUtm(b.utm)]); return { ok: true }; }
     catch (e) { return dbErr(reply, e); }
   });
 
   app.post('/api/track', strict, async (req, reply) => {
     const b = req.body || {}; const s = await siteBy(b.site); if (!s) return fail(reply, 'الموقع غير موجود', 404);
-    const no = parseInt(String(b.order_no || '').replace(/\D/g, ''), 10); if (!no) return fail(reply, 'رقم الطلب غير صحيح');
+    const no = parseInt(String(b.order_no || '').replace(/\D/g, '').slice(0, 15), 10); if (!no) return fail(reply, 'رقم الطلب غير صحيح');
     const r = (await q('select track_order($1,$2,$3) r', [s.id, no, String(b.phone || '')]))[0].r;
     return r ? { ok: true, order: r } : fail(reply, 'ما لقينا طلب بهذه البيانات', 404);
   });
@@ -97,18 +118,23 @@ export function build() {
     const b = req.body || {}; const s = await siteBy(b.site); if (!s) return fail(reply, 'الموقع غير موجود', 404);
     const stars = Math.min(5, Math.max(1, +b.stars || 5)), name = String(b.name || '').trim().slice(0, 60), body = String(b.body || '').trim().slice(0, 2000);
     if (!name || !body) return fail(reply, 'اكتب الاسم والتقييم');
-    const imgs = (Array.isArray(b.images) ? b.images : []).filter(u => /^https:\/\//.test(u)).slice(0, 3); // الصور ترفع أولاً على Storage
-    await q(`insert into reviews(site_id,product_id,name,stars,body,images,approved,verified) values($1,$2,$3,$4,$5,$6,false,false)`,
-      [s.id, b.product_id || null, name, stars, body, JSON.stringify(imgs)]);
-    return { ok: true, message: 'شكراً! سيظهر تقييمك بعد مراجعته' };
+    // الصور: روابط https نظيفة فقط (بدون رموز تكسر الـ HTML/CSS) — تُعرض بلوحة الإدارة وبالموقع
+    const imgs = (Array.isArray(b.images) ? b.images : []).filter(u => typeof u === 'string' && u.length < 500 && /^https:\/\/[\w.-]+\/[\w\-./%~]+$/.test(u)).slice(0, 3);
+    try {
+      const pid = isUuid(b.product_id) ? (await q(`select 1 from site_products where site_id=$1 and product_id=$2`, [s.id, b.product_id]))[0] ? b.product_id : null : null;
+      await q(`insert into reviews(site_id,product_id,name,stars,body,images,approved,verified) values($1,$2,$3,$4,$5,$6,false,false)`,
+        [s.id, pid, name, stars, body, JSON.stringify(imgs)]);
+      return { ok: true, message: 'شكراً! سيظهر تقييمك بعد مراجعته' };
+    } catch (e) { return dbErr(reply, e); }
   });
 
   app.post('/api/subscribe', strict, async (req, reply) => {
     const b = req.body || {}; const s = await siteBy(b.site); if (!s) return fail(reply, 'الموقع غير موجود', 404);
     const phone = String(b.phone || '').trim(); if (phone.replace(/\D/g, '').length < 9) return fail(reply, 'أدخل رقماً صحيحاً');
-    const email = String(b.email || '').trim(); if (email && !/^\S+@\S+\.\S+$/.test(email)) return fail(reply, 'الإيميل غير صحيح');
+    if (phone.length > 25) return fail(reply, 'أدخل رقماً صحيحاً');
+    const email = String(b.email || '').trim().slice(0, 120); if (email && !/^\S+@\S+\.\S+$/.test(email)) return fail(reply, 'الإيميل غير صحيح');
     await q(`insert into subscribers(site_id,name,email,phone) values($1,$2,$3,$4) on conflict(site_id,phone) do update set name=coalesce(excluded.name,subscribers.name), email=coalesce(excluded.email,subscribers.email)`,
-      [s.id, String(b.name || '').trim() || null, email || null, phone]);
+      [s.id, str(b.name, 80) || null, email || null, phone]);
     let coupon = null; const wc = s.config && s.config.welcomeCp;
     if (wc) coupon = (await q(`select code from coupons where code=$1 and active`, [wc]))[0]?.code || null;
     return { ok: true, coupon };
@@ -117,7 +143,9 @@ export function build() {
   app.post('/api/restock', strict, async (req, reply) => {
     const b = req.body || {}; const s = await siteBy(b.site); if (!s) return fail(reply, 'الموقع غير موجود', 404);
     const phone = String(b.phone || '').trim(); if (phone.replace(/\D/g, '').length < 9) return fail(reply, 'أدخل رقماً صحيحاً');
-    try { await q(`insert into restock_requests(site_id,product_id,phone) values($1,$2,$3)`, [s.id, b.product_id, phone]); return { ok: true }; }
+    if (phone.length > 25 || !isUuid(b.product_id)) return fail(reply, 'أدخل رقماً صحيحاً');
+    try { if (!(await q(`select 1 from restock_requests where site_id=$1 and product_id=$2 and phone=$3 and not done`, [s.id, b.product_id, phone]))[0])
+        await q(`insert into restock_requests(site_id,product_id,phone) values($1,$2,$3)`, [s.id, b.product_id, phone]); return { ok: true }; }
     catch (e) { return dbErr(reply, e); }
   });
 
@@ -125,20 +153,23 @@ export function build() {
   app.post('/api/coupon', strict, async (req, reply) => {
     const b = req.body || {}; const s = await siteBy(b.site); if (!s) return fail(reply, 'الموقع غير موجود', 404);
     const c = (await q(`select c.* from coupons c where upper(code)=upper($1) and active and (expires_on is null or expires_on>=current_date) and (max_uses=0 or used_count<max_uses)
-      and (not exists(select 1 from coupon_sites x where x.coupon_id=c.id) or exists(select 1 from coupon_sites x where x.coupon_id=c.id and x.site_id=$2))`, [String(b.code || ''), s.id]))[0];
+      and (not exists(select 1 from coupon_sites x where x.coupon_id=c.id) or exists(select 1 from coupon_sites x where x.coupon_id=c.id and x.site_id=$2))`, [str(b.code, 40), s.id]))[0];
     return c ? { ok: true, type: c.type, value: +c.value } : fail(reply, 'الكوبون غير صالح');
   });
 
   // ================= اللوحة والمتجر الحقيقيين =================
   const SB = (env.SUPABASE_URL || '').replace(/\/$/, ''), ANON = env.SUPABASE_ANON_KEY || '', SVC = env.SUPABASE_SERVICE_KEY || '';
+  if (env.NODE_ENV !== 'test' && (!/^https:\/\//.test(SB) || !ANON)) app.log.error('SUPABASE_URL / SUPABASE_ANON_KEY ناقصة أو غير صحيحة — تسجيل الدخول للوحة لن يعمل');
   const tokCache = new Map();
   async function authUser(req) {
-    const t = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-    if (env.NODE_ENV === 'test' && env.AUTH_TEST_UID && t === 'test') return env.AUTH_TEST_UID;
-    if (!t) return null;
+    const t = String(req.headers.authorization || '').replace(/^Bearer\s*/i, '');
+    if (env.NODE_ENV === 'test' && env.AUTH_TEST_UID) { if (t === 'test') return env.AUTH_TEST_UID; if (/^test:/.test(t) && isUuid(t.slice(5))) return t.slice(5); } // للاختبارات فقط
+    if (!t || !SB || !ANON) return null;
     const c = tokCache.get(t); if (c && c.exp > Date.now()) return c.id;
-    const r = await fetch(SB + '/auth/v1/user', { headers: { apikey: ANON, authorization: 'Bearer ' + t } });
-    if (!r.ok) return null; const u = await r.json(); tokCache.set(t, { id: u.id, exp: Date.now() + 60_000 }); return u.id;
+    let r; try { r = await fetch(SB + '/auth/v1/user', { headers: { apikey: ANON, authorization: 'Bearer ' + t } }); } catch (e) { app.log.error({ e: e.message }, 'supabase auth unreachable'); return null; }
+    if (!r.ok) return null; const u = await r.json().catch(() => null); if (!u || !isUuid(u.id)) return null;
+    if (tokCache.size > 500) tokCache.clear();
+    tokCache.set(t, { id: u.id, exp: Date.now() + 60_000 }); return u.id;
   }
   async function staffOf(req, reply) {
     const id = await authUser(req); if (!id) { reply.code(401); return null; }
@@ -159,37 +190,52 @@ export function build() {
     const j = await r.json(); if (!r.ok) throw new Error('تعذّر دعوة الموظف: ' + (j.msg || j.message || r.status)); return j.id;
   };
 
-  app.get('/admin', async (req, reply) => reply.type('text/html').send(page({ mode: 'admin', sb: SB, anon: ANON })));
+  const authAdmin = async (path, method, body) => {
+    if (!SVC) throw new Error('أضف SUPABASE_SERVICE_KEY (service_role) بإعدادات Render');
+    const r = await fetch(SB + '/auth/v1/admin/' + path, { method, headers: { apikey: SVC, authorization: 'Bearer ' + SVC, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { const m = j.msg || j.message || j.error_description || ''; throw new Error(/already/i.test(m) ? 'هذا الإيميل مسجّل مسبقاً' : /password/i.test(m) ? 'كلمة السر ضعيفة' : 'تعذّر إنشاء حساب الموظف: ' + (m || r.status)); }
+    return j;
+  };
+  const createUser = async (email, password) => (await authAdmin('users', 'POST', { email, password, email_confirm: true })).id;
+  const setPassword = async (id, password) => { await authAdmin('users/' + id, 'PUT', { password }); };
+  app.get('/admin', async (req, reply) => reply.type('text/html').header('cache-control', 'no-store').send(page({ mode: 'admin', sb: SB, anon: ANON })));
   app.get('/admin/me', async (req, reply) => { const st = await staffOf(req, reply); return st ? { ok: true, id: st.user_id, name: st.name, role: st.role } : { ok: false }; });
   app.get('/admin/state', async (req, reply) => {
     const st = await staffOf(req, reply); if (!st) return { ok: false, error: 'غير مصرّح' };
     const c = await pool.connect(); try { const S = await loadState(c, { mode: 'admin', staff: st }); S.me = st.user_id; return { ok: true, S }; } finally { c.release(); }
   });
-  app.post('/admin/sync', { bodyLimit: 5_000_000 }, async (req, reply) => {
+  app.post('/admin/sync', { bodyLimit: 5_000_000, config: { rateLimit: { max: 240, timeWindow: '1 minute' } } }, async (req, reply) => {
     const st = await staffOf(req, reply); if (!st) return { ok: false, error: 'غير مصرّح' };
-    try { const r = await tx(st.user_id, c => applySync(c, st, req.body || {}, { invite })); return { ok: true, ...r }; } catch (e) { return dbErr(reply, e); }
+    try { const r = await tx(st.user_id, c => applySync(c, st, req.body || {}, { invite, createUser, setPassword })); return { ok: true, ...r }; } catch (e) { return dbErr(reply, e); }
   });
-  app.post('/admin/action', async (req, reply) => {
+  app.post('/admin/action', { config: { rateLimit: { max: 240, timeWindow: '1 minute' } } }, async (req, reply) => {
     const st = await staffOf(req, reply); if (!st) return { ok: false, error: 'غير مصرّح' };
     const b = req.body || {};
     try {
-      if (b.type === 'status') { if (!can(st, 'orders')) throw new Error('غير مصرّح');
-        await tx(st.user_id, c => c.query(`select set_order_status($1,$2,$3)`, [b.order, b.status, b.who || st.name])); return { ok: true }; }
-      if (b.type === 'stock') { if (!can(st, 'products')) throw new Error('غير مصرّح');
+      if (b.type === 'status') { if (!can(st, 'orders') && !can(st, 'delivery')) throw new Error('غير مصرّح');
+        if (!isUuid(b.order) || !isUuid(b.status)) throw new Error('بيانات غير صحيحة');
+        const o = (await q(`select site_id from orders where id=$1`, [b.order]))[0]; if (!o) throw new Error('الطلب غير موجود');
+        if (st.role !== 'admin' && st.site_ids && !st.site_ids.includes(o.site_id)) throw new Error('غير مصرّح');
+        if (!(await q(`select 1 from order_statuses where id=$1`, [b.status]))[0]) throw new Error('الحالة غير موجودة، حدّث الصفحة');
+        await tx(st.user_id, c => c.query(`select set_order_status($1,$2,$3)`, [b.order, b.status, str(b.who, 80) || st.name])); return { ok: true }; }
+      if (b.type === 'stock') { if (!can(st, 'products')) throw new Error('غير مصرّح'); if (!isUuid(b.pid)) throw new Error('بيانات غير صحيحة');
         await tx(st.user_id, c => c.query(`select adjust_stock($1,$2,$3,$4)`, [b.pid, Math.max(0, Math.floor(+b.qty || 0)), st.name, b.reason || 'تعديل يدوي'])); return { ok: true }; }
-      if (b.type === 'settle') { if (!can(st, 'delivery')) throw new Error('غير مصرّح');
+      if (b.type === 'settle') { if (!can(st, 'delivery')) throw new Error('غير مصرّح'); if (!isUuid(b.cid)) throw new Error('بيانات غير صحيحة');
         const r = await tx(st.user_id, async c => (await c.query(`select settle_courier($1,$2) r`, [b.cid, st.name])).rows[0].r); return { ok: true, r }; }
-      if (b.type === 'read') { await q(`update notifications set read=true where not read`); return { ok: true }; }
+      if (b.type === 'read') { if (!can(st, 'orders') && !can(st, 'products')) return { ok: true }; await q(`update notifications set read=true where not read`); return { ok: true }; }
       throw new Error('إجراء غير معروف');
     } catch (e) { return dbErr(reply, e); }
   });
-  app.post('/admin/upload', { bodyLimit: 30_000_000 }, async (req, reply) => {
+  app.post('/admin/upload', { bodyLimit: 30_000_000, config: { rateLimit: { max: 120, timeWindow: '1 minute' } } }, async (req, reply) => {
     const st = await staffOf(req, reply); if (!st) return { ok: false, error: 'غير مصرّح' };
     const m = /^data:([\w/+.-]+);base64,(.+)$/s.exec(String((req.body || {}).data || '')); if (!m) return fail(reply, 'ملف غير صالح');
-    if (!SVC) return fail(reply, 'أضف SUPABASE_SERVICE_KEY لرفع الصور');
+    if (!/^(image\/(png|jpe?g|webp|gif)|video\/(mp4|webm|quicktime))$/.test(m[1])) return fail(reply, 'نوع الملف غير مدعوم (صور أو فيديو mp4 فقط)');
+    if (!SVC || !SB) return fail(reply, 'أضف SUPABASE_URL و SUPABASE_SERVICE_KEY بإعدادات الخادم لرفع الصور');
     const ext = (m[1].split('/')[1] || 'bin').replace('jpeg', 'jpg').replace(/[^a-z0-9]/g, ''), path = `${new Date().toISOString().slice(0, 7)}/${crypto.randomUUID()}.${ext}`;
-    const r = await fetch(`${SB}/storage/v1/object/media/${path}`, { method: 'POST', headers: { apikey: SVC, authorization: 'Bearer ' + SVC, 'content-type': m[1], 'cache-control': '31536000' }, body: Buffer.from(m[2], 'base64') });
-    if (!r.ok) return fail(reply, 'فشل رفع الملف: ' + (await r.text()).slice(0, 150), 500);
+    let r; try { r = await fetch(`${SB}/storage/v1/object/media/${path}`, { method: 'POST', headers: { apikey: SVC, authorization: 'Bearer ' + SVC, 'content-type': m[1], 'cache-control': '31536000' }, body: Buffer.from(m[2], 'base64') }); }
+    catch (e) { return fail(reply, 'تعذّر الاتصال بمخزن الصور (تأكد من SUPABASE_URL)', 502); }
+    if (!r.ok) { const t = (await r.text()).slice(0, 150); return fail(reply, /bucket/i.test(t) ? 'مخزن الصور غير جاهز: أنشئ Bucket عام باسم media في Supabase Storage' : 'فشل رفع الملف: ' + t, 500); }
     return { ok: true, url: `${SB}/storage/v1/object/public/media/${path}` };
   });
 
@@ -215,14 +261,15 @@ export function build() {
     }
     return reply.type('text/html').header('cache-control', 'public, max-age=60').send(page({ mode: 'store', site: s.slug }, seo));
   };
-  app.get('/', storePage); app.get('/p/:slug', storePage); app.get('/track', storePage);
+  app.get('/', storePage); app.get('/p/:slug', storePage); app.get('/track', storePage); app.get('/thanks', storePage);
+  });
   return app;
 }
 
 // Meta Conversions API — event_id = رقم الطلب لمنع التكرار مع البكسل بالمتصفح
 const sha = v => v ? crypto.createHash('sha256').update(String(v).trim().toLowerCase()).digest('hex') : undefined;
 async function sendCapi(site, r, b, req) {
-  const cfg = site.config || {}, pixel = cfg.pixel, token = cfg.capiToken || env['CAPI_TOKEN_' + site.slug.toUpperCase().replace(/-/g, '_')];
+  const cfg = site.config || {}, pixel = cfg.pixel, token = cfg.capiToken || cfg.capi || env['CAPI_TOKEN_' + site.slug.toUpperCase().replace(/-/g, '_')];
   if (!pixel || !token) return;
   const phone = String(b.phone || '').replace(/\D/g, '').replace(/^0/, '962');
   const body = { data: [{
