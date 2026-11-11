@@ -251,6 +251,8 @@ export function build() {
   const storePage = async (req, reply) => {
     const s = await storeSite(req); if (!s) return reply.code(404).type('text/html').send('<h1 style="font-family:sans-serif;text-align:center;margin-top:20vh">لا يوجد موقع بعد — أنشئه من /admin</h1>');
     const cfg = s.config || {}; let seo = { title: cfg.seoT || s.name, desc: cfg.seoD || ((cfg.t || {}).ar || {}).heroSub || '' };
+    if (req.params.page) { const pg = (cfg.cpages || []).find(p => p.slug === req.params.page); if (pg) seo = { title: `${pg.title} | ${s.name}`, desc: seo.desc }; }
+    if (req.url.startsWith('/collections/all')) seo = { title: `${(cfg.coll || {}).title || 'كل المنتجات'} | ${s.name}`, desc: seo.desc };
     if (req.params.slug) {
       const p = (await q(`select p.* , coalesce(sp.price_override,p.price_jod) pr from products p join site_products sp on sp.product_id=p.id and sp.site_id=$1 and sp.active where p.active and (p.slug=$2 or p.id::text=$2) limit 1`, [s.id, req.params.slug]))[0];
       if (p) { const rv = (await q(`select count(*)::int n, avg(stars)::numeric(3,1) a from reviews where product_id=$1 and approved`, [p.id]))[0];
@@ -261,7 +263,7 @@ export function build() {
     }
     return reply.type('text/html').header('cache-control', 'public, max-age=60').send(page({ mode: 'store', site: s.slug }, seo));
   };
-  app.get('/', storePage); app.get('/p/:slug', storePage); app.get('/track', storePage); app.get('/thanks', storePage);
+  app.get('/', storePage); app.get('/p/:slug', storePage); app.get('/track', storePage); app.get('/thanks', storePage); app.get('/pages/:page', storePage); app.get('/collections/all', storePage);
   });
   return app;
 }
