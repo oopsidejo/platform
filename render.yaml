@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: platform-api
+    runtime: node
+    plan: starter        # المجانية بتنام وبتبطّئ أول طلب — للإعلانات استخدم starter
+    region: frankfurt
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATABASE_URL
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: CAPI_TOKEN_MAHAMIHO
+        sync: false
+      - key: CAPI_TOKEN_MK_PERFUMES
+        sync: false
