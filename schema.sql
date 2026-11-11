@@ -43,7 +43,7 @@ create table coupons(id uuid primary key default gen_random_uuid(), code text un
   expires_on date, max_uses int not null default 0, used_count int not null default 0, ref_phone text, active boolean not null default true);
 create table coupon_sites(coupon_id uuid references coupons(id) on delete cascade, site_id uuid references sites(id) on delete cascade, primary key(coupon_id,site_id));  -- فاضي = كل المواقع
 create table reviews(id uuid primary key default gen_random_uuid(), site_id uuid not null references sites(id) on delete cascade, product_id uuid references products(id) on delete cascade,
-  name text not null, stars int not null check(stars between 1 and 5), body text not null, images jsonb not null default '[]', verified boolean not null default false,
+  name text not null, stars int not null check(stars between 1 and 5), body text not null, images jsonb not null default '[]', video text, verified boolean not null default false,
   approved boolean not null default false, created_at timestamptz not null default now());
 create table subscribers(id uuid primary key default gen_random_uuid(), site_id uuid not null references sites(id) on delete cascade, name text, email text, phone text not null, created_at timestamptz not null default now(), unique(site_id,phone));
 

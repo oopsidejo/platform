@@ -1,48 +1,27 @@
-# خطوات الرفع لايف — بالترتيب
+# الرفع لايف (مجاني)
 
-## 1) GitHub (5 دقائق)
-1. github.com → New repository → اسمه `platform` (Private).
-2. ارفع مجلد `api` ومجلد `handoff` كما هما.
+## 1) GitHub
+ارفع كل الملفات والمجلدات (src, public, test, migrations, reference) فوق القديمة.
 
-## 2) Supabase — قاعدة البيانات (10 دقائق)
-1. supabase.com → New project → المنطقة **Frankfurt (eu-central-1)** → احفظ كلمة سر القاعدة.
-2. SQL Editor → New query → الصق محتوى `schema.sql` كامل → Run. لازم يطلع Success.
-3. Authentication → Users → Add user → إيميلك وكلمة سر (هذا حساب الأدمن).
-4. SQL Editor شغّل (بدّل الإيميل):
-```sql
-insert into staff(user_id,name,role) select id,'وليد','admin' from auth.users where email='YOUR@EMAIL.com';
-```
-5. أنشئ الموقع الأول:
-```sql
-insert into sites(slug,name,domain,whatsapp,config) values('mahamiho','محاميحو','mahamiho.com','9627XXXXXXXX',
- '{"freeShip":{"on":true,"min":30},"proof":{"on":true,"min":2},"leads":true,"pixel":"PIXEL_ID"}');
-insert into site_countries select id,'jo' from sites where slug='mahamiho';
-insert into site_currencies select id,'JOD' from sites where slug='mahamiho';
-```
-6. Storage → New bucket → `media` → Public.
-7. Project Settings → Database → Connection string → **Session pooler** → انسخ الرابط وحط كلمة السر مكان `[YOUR-PASSWORD]`. هذا هو `DATABASE_URL`.
-8. Project Settings → Database → Backups: تأكد إنها مفعّلة. Authentication → فعّل MFA للأدمن.
+## 2) Supabase
+1. SQL Editor: شغّل `schema.sql` (إذا ما شغّلته بعد)، ثم شغّل `migrations/v1.3.sql` (آمن حتى لو شغّلته مرتين).
+2. Authentication → Users → Add user (إيميلك + كلمة سر + Auto Confirm) ثم أوامر الأدمن والموقع.
+3. Storage → New bucket → الاسم `media` → فعّل Public.
+4. انسخ من Project Settings:
+   - API → Project URL = `SUPABASE_URL`
+   - API Keys → anon/publishable = `SUPABASE_ANON_KEY`
+   - API Keys → service_role/secret = `SUPABASE_SERVICE_KEY` (سري!)
+   - Database → Connect → Session pooler = `DATABASE_URL` (حط كلمة سر القاعدة مكان [YOUR-PASSWORD])
 
-## 3) Render — السيرفر (10 دقائق)
-1. render.com → سجّل بـ GitHub → New → **Blueprint** → اختر الريبو (يقرأ `api/render.yaml`).
-   - إذا ما ظهر: New → Web Service → Root Directory: `api` → Build: `npm ci` → Start: `npm start`.
-2. Environment: حط `DATABASE_URL` و`ALLOWED_ORIGINS` (دومينات المواقع) و`CAPI_TOKEN_MAHAMIHO`.
-3. الخطة: **Starter** (المجانية بتنام وبتخسرك طلبات من الإعلانات).
-4. افتح `https://<اسم-الخدمة>.onrender.com/health` → لازم يطلع `{"ok":true}`.
-5. افحص: `https://<الخدمة>.onrender.com/api/site?site=mahamiho` → لازم يرجع بيانات الموقع.
+## 3) Render (مجاني)
+1. render.com → New → Blueprint → اختر الريبو.
+2. عبّي المتغيرات الأربعة من الخطوة 2.
+3. بعد ما يخلص: افتح `https://<اسمك>.onrender.com/health` → `{"ok":true}`.
+4. المتجر: `https://<اسمك>.onrender.com/` — اللوحة: `https://<اسمك>.onrender.com/admin`
 
-## 4) الواجهة (شغل الشاب)
-- Next.js على Vercel أو Render: الموقع العام يقرأ `GET /api/site` ويرسل الطلب لـ `POST /api/orders`، بنفس شكل `reference/platform6.html`.
-- لوحة التحكم: Next.js + `@supabase/supabase-js` بتسجيل دخول الموظف.
-- متغيرات الواجهة: `NEXT_PUBLIC_API_URL`، `NEXT_PUBLIC_SUPABASE_URL`، `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
+## 4) بعد أول تشغيل
+- Supabase → Authentication → URL Configuration → Site URL = `https://<اسمك>.onrender.com/admin` (لروابط دعوة الموظفين ونسيت كلمة السر).
+- UptimeRobot (مجاني): HTTP monitor على `/health` كل 5 دقائق حتى ما ينام السيرفر.
 
-## 5) الدومين
-- بمزوّد الدومين: `CNAME www → <عنوان الواجهة>` و A/ALIAS للجذر حسب تعليمات Vercel/Render.
-- (اختياري) `api.mahamiho.com` → CNAME لخدمة Render، وأضفه بـ Render → Custom Domains.
-- أضف الدومين بـ `ALLOWED_ORIGINS` وبجدول `sites.domain`.
-
-## 6) قبل أول إعلان — اختبار
-- [ ] طلب حقيقي من الموبايل وصل للوحة والمخزون نقص.
-- [ ] طلب برقم ناقص يرفض، وكوبون غلط يرفض.
-- [ ] Meta Events Manager → Test Events: وصل Purchase مرة وحدة (مش مكرر).
-- [ ] صفحة المنتج تفتح بأقل من 3 ثواني على 4G.
+## 5) الدومين (لاحقاً)
+Render → Settings → Custom Domains → أضف الدومين، وحطه بخانة الدومين بتصميم الموقع باللوحة.

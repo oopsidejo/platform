@@ -5,7 +5,8 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node test/api.test.mjs"
+    "test": "node test/api.test.mjs",
+    "local": "node test/live-server.mjs"
   },
   "keywords": [],
   "author": "",

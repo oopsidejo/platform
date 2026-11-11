@@ -5,6 +5,7 @@ import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import pg from 'pg';
 import crypto from 'node:crypto';
+import { loadState, applySync, can, page } from './live.js';
 
 const env = process.env;
 const pool = new pg.Pool({
@@ -27,6 +28,8 @@ export function build() {
   const dbErr = (reply, e) => {
     const m = String(e.message || '');
     if (/[؀-ۿ]/.test(m)) return fail(reply, m);
+    if (e.code === '23505') return fail(reply, 'قيمة مكررة: ' + (/slug/.test(m) ? 'الرابط المختصر مستخدم لمنتج أو موقع آخر' : /code/.test(m) ? 'كود الكوبون مستخدم' : /domain/.test(m) ? 'الدومين مستخدم لموقع آخر' : 'موجودة مسبقاً'));
+    if (e.code === '23503') return fail(reply, 'لا يمكن الحذف: العنصر مرتبط ببيانات أخرى');
     app.log.error(e); return fail(reply, 'حدث خطأ، حاول مرة ثانية', 500);
   };
   const siteBy = async (key) => (await q(
@@ -125,6 +128,94 @@ export function build() {
       and (not exists(select 1 from coupon_sites x where x.coupon_id=c.id) or exists(select 1 from coupon_sites x where x.coupon_id=c.id and x.site_id=$2))`, [String(b.code || ''), s.id]))[0];
     return c ? { ok: true, type: c.type, value: +c.value } : fail(reply, 'الكوبون غير صالح');
   });
+
+  // ================= اللوحة والمتجر الحقيقيين =================
+  const SB = (env.SUPABASE_URL || '').replace(/\/$/, ''), ANON = env.SUPABASE_ANON_KEY || '', SVC = env.SUPABASE_SERVICE_KEY || '';
+  const tokCache = new Map();
+  async function authUser(req) {
+    const t = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (env.NODE_ENV === 'test' && env.AUTH_TEST_UID && t === 'test') return env.AUTH_TEST_UID;
+    if (!t) return null;
+    const c = tokCache.get(t); if (c && c.exp > Date.now()) return c.id;
+    const r = await fetch(SB + '/auth/v1/user', { headers: { apikey: ANON, authorization: 'Bearer ' + t } });
+    if (!r.ok) return null; const u = await r.json(); tokCache.set(t, { id: u.id, exp: Date.now() + 60_000 }); return u.id;
+  }
+  async function staffOf(req, reply) {
+    const id = await authUser(req); if (!id) { reply.code(401); return null; }
+    const st = (await q(`select * from staff where user_id=$1`, [id]))[0]; if (!st) { reply.code(403); return null; }
+    return st;
+  }
+  async function tx(uid, fn) {
+    const c = await pool.connect();
+    try {
+      await c.query('begin');
+      await c.query(`select set_config('request.jwt.claim.sub',$1,true), set_config('request.jwt.claims',$2,true)`, [uid, JSON.stringify({ sub: uid, role: 'authenticated' })]).catch(() => {});
+      const r = await fn(c); await c.query('commit'); return r;
+    } catch (e) { await c.query('rollback').catch(() => {}); throw e; } finally { c.release(); }
+  }
+  const invite = async (email) => {
+    if (!SVC) throw new Error('أضف SUPABASE_SERVICE_KEY لإضافة موظفين');
+    const r = await fetch(SB + '/auth/v1/invite', { method: 'POST', headers: { apikey: SVC, authorization: 'Bearer ' + SVC, 'content-type': 'application/json' }, body: JSON.stringify({ email }) });
+    const j = await r.json(); if (!r.ok) throw new Error('تعذّر دعوة الموظف: ' + (j.msg || j.message || r.status)); return j.id;
+  };
+
+  app.get('/admin', async (req, reply) => reply.type('text/html').send(page({ mode: 'admin', sb: SB, anon: ANON })));
+  app.get('/admin/me', async (req, reply) => { const st = await staffOf(req, reply); return st ? { ok: true, id: st.user_id, name: st.name, role: st.role } : { ok: false }; });
+  app.get('/admin/state', async (req, reply) => {
+    const st = await staffOf(req, reply); if (!st) return { ok: false, error: 'غير مصرّح' };
+    const c = await pool.connect(); try { const S = await loadState(c, { mode: 'admin', staff: st }); S.me = st.user_id; return { ok: true, S }; } finally { c.release(); }
+  });
+  app.post('/admin/sync', { bodyLimit: 5_000_000 }, async (req, reply) => {
+    const st = await staffOf(req, reply); if (!st) return { ok: false, error: 'غير مصرّح' };
+    try { const r = await tx(st.user_id, c => applySync(c, st, req.body || {}, { invite })); return { ok: true, ...r }; } catch (e) { return dbErr(reply, e); }
+  });
+  app.post('/admin/action', async (req, reply) => {
+    const st = await staffOf(req, reply); if (!st) return { ok: false, error: 'غير مصرّح' };
+    const b = req.body || {};
+    try {
+      if (b.type === 'status') { if (!can(st, 'orders')) throw new Error('غير مصرّح');
+        await tx(st.user_id, c => c.query(`select set_order_status($1,$2,$3)`, [b.order, b.status, b.who || st.name])); return { ok: true }; }
+      if (b.type === 'stock') { if (!can(st, 'products')) throw new Error('غير مصرّح');
+        await tx(st.user_id, c => c.query(`select adjust_stock($1,$2,$3,$4)`, [b.pid, Math.max(0, Math.floor(+b.qty || 0)), st.name, b.reason || 'تعديل يدوي'])); return { ok: true }; }
+      if (b.type === 'settle') { if (!can(st, 'delivery')) throw new Error('غير مصرّح');
+        const r = await tx(st.user_id, async c => (await c.query(`select settle_courier($1,$2) r`, [b.cid, st.name])).rows[0].r); return { ok: true, r }; }
+      if (b.type === 'read') { await q(`update notifications set read=true where not read`); return { ok: true }; }
+      throw new Error('إجراء غير معروف');
+    } catch (e) { return dbErr(reply, e); }
+  });
+  app.post('/admin/upload', { bodyLimit: 30_000_000 }, async (req, reply) => {
+    const st = await staffOf(req, reply); if (!st) return { ok: false, error: 'غير مصرّح' };
+    const m = /^data:([\w/+.-]+);base64,(.+)$/s.exec(String((req.body || {}).data || '')); if (!m) return fail(reply, 'ملف غير صالح');
+    if (!SVC) return fail(reply, 'أضف SUPABASE_SERVICE_KEY لرفع الصور');
+    const ext = (m[1].split('/')[1] || 'bin').replace('jpeg', 'jpg').replace(/[^a-z0-9]/g, ''), path = `${new Date().toISOString().slice(0, 7)}/${crypto.randomUUID()}.${ext}`;
+    const r = await fetch(`${SB}/storage/v1/object/media/${path}`, { method: 'POST', headers: { apikey: SVC, authorization: 'Bearer ' + SVC, 'content-type': m[1], 'cache-control': '31536000' }, body: Buffer.from(m[2], 'base64') });
+    if (!r.ok) return fail(reply, 'فشل رفع الملف: ' + (await r.text()).slice(0, 150), 500);
+    return { ok: true, url: `${SB}/storage/v1/object/public/media/${path}` };
+  });
+
+  // المتجر العام: الدومين يحدد الموقع (وإذا ما تطابق → أول موقع، مفيد لرابط onrender)
+  async function storeSite(req) {
+    const host = String(req.query.site || req.hostname || '').replace(/^www\./, '').replace(/:\d+$/, '').toLowerCase();
+    return (await siteBy(host)) || (await q(`select * from sites where active order by created_at limit 1`))[0];
+  }
+  app.get('/store/state', async (req, reply) => {
+    const s = await storeSite(req); if (!s) return fail(reply, 'لا يوجد موقع', 404);
+    const c = await pool.connect(); try { reply.header('cache-control', 'public, max-age=20'); return { ok: true, S: await loadState(c, { mode: 'store', siteId: s.id }) }; } finally { c.release(); }
+  });
+  const storePage = async (req, reply) => {
+    const s = await storeSite(req); if (!s) return reply.code(404).type('text/html').send('<h1 style="font-family:sans-serif;text-align:center;margin-top:20vh">لا يوجد موقع بعد — أنشئه من /admin</h1>');
+    const cfg = s.config || {}; let seo = { title: cfg.seoT || s.name, desc: cfg.seoD || ((cfg.t || {}).ar || {}).heroSub || '' };
+    if (req.params.slug) {
+      const p = (await q(`select p.* , coalesce(sp.price_override,p.price_jod) pr from products p join site_products sp on sp.product_id=p.id and sp.site_id=$1 and sp.active where p.active and (p.slug=$2 or p.id::text=$2) limit 1`, [s.id, req.params.slug]))[0];
+      if (p) { const rv = (await q(`select count(*)::int n, avg(stars)::numeric(3,1) a from reviews where product_id=$1 and approved`, [p.id]))[0];
+        seo = { title: p.seo_title || `${p.name} | ${s.name}`, desc: p.seo_desc || p.description || '', img: (p.images || [])[0],
+          ld: { '@context': 'https://schema.org', '@type': 'Product', name: p.name, description: p.seo_desc || p.description || '', image: p.images || [],
+            offers: { '@type': 'Offer', priceCurrency: 'JOD', price: +p.pr, availability: p.stock > 0 ? 'https://schema.org/InStock' : 'https://schema.org/OutOfStock' },
+            ...(rv.n ? { aggregateRating: { '@type': 'AggregateRating', ratingValue: +rv.a, reviewCount: rv.n } } : {}) } }; }
+    }
+    return reply.type('text/html').header('cache-control', 'public, max-age=60').send(page({ mode: 'store', site: s.slug }, seo));
+  };
+  app.get('/', storePage); app.get('/p/:slug', storePage); app.get('/track', storePage);
   return app;
 }
 

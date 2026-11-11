@@ -4,7 +4,7 @@ import { PGLiteSocketServer } from '@electric-sql/pglite-socket';
 import fs from 'fs';
 const db = new PGlite();
 await db.exec(`create role anon; create role authenticated; create role service_role; create schema auth; create function auth.uid() returns uuid language sql as $$ select null::uuid $$;`);
-await db.exec(fs.readFileSync(new URL('../../handoff/schema.sql', import.meta.url), 'utf8'));
+await db.exec(fs.readFileSync(new URL('../schema.sql', import.meta.url), 'utf8'));
 const site = (await db.query(`insert into sites(slug,name,domain,config) values('mahamiho','محاميحو','mahamiho.com','{"freeShip":{"on":true,"min":30},"capiToken":"SECRET"}') returning id`)).rows[0].id;
 await db.exec(`insert into site_countries values('${site}','jo'); insert into site_currencies values('${site}','JOD')`);
 const pid = (await db.query(`insert into products(slug,name,price_jod,stock,tiers) values('serum','سيروم',14,10,'[{"qty":2,"type":"pct","val":10}]') returning id`)).rows[0].id;
