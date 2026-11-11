@@ -2,7 +2,7 @@ services:
   - type: web
     name: platform-api
     runtime: node
-    plan: starter        # المجانية بتنام وبتبطّئ أول طلب — للإعلانات استخدم starter
+    plan: free        # المجانية بتنام وبتبطّئ أول طلب — للإعلانات استخدم starter
     region: frankfurt
     buildCommand: npm ci
     startCommand: npm start
