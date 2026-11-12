@@ -271,7 +271,7 @@ export function build() {
     const m = /^data:([\w/+.-]+);base64,(.+)$/s.exec(String((req.body || {}).data || '')); if (!m) return fail(reply, 'ملف غير صالح');
     if (!/^(image\/(png|jpe?g|webp|gif)|video\/(mp4|webm|quicktime))$/.test(m[1])) return fail(reply, 'نوع الملف غير مدعوم (صور أو فيديو mp4 فقط)');
     if (!SVC || !SB) return fail(reply, 'أضف SUPABASE_URL و SUPABASE_SERVICE_KEY بإعدادات الخادم لرفع الصور');
-    const ext = (m[1].split('/')[1] || 'bin').replace('jpeg', 'jpg').replace(/[^a-z0-9]/g, ''), path = `${new Date().toISOString().slice(0, 7)}/${crypto.randomUUID()}.${ext}`;
+    const ext = (m[1].split('/')[1] || 'bin').replace('jpeg', 'jpg').replace('quicktime', 'mov').replace(/[^a-z0-9]/g, ''), path = `${new Date().toISOString().slice(0, 7)}/${crypto.randomUUID()}.${ext}`;
     let r; try { r = await fetch(`${SB}/storage/v1/object/media/${path}`, { method: 'POST', headers: { apikey: SVC, authorization: 'Bearer ' + SVC, 'content-type': m[1], 'cache-control': '31536000' }, body: Buffer.from(m[2], 'base64') }); }
     catch (e) { return fail(reply, 'تعذّر الاتصال بمخزن الصور (تأكد من SUPABASE_URL)', 502); }
     if (!r.ok) { const t = (await r.text()).slice(0, 150); return fail(reply, /bucket/i.test(t) ? 'مخزن الصور غير جاهز: أنشئ Bucket عام باسم media في Supabase Storage' : 'فشل رفع الملف: ' + t, 500); }
