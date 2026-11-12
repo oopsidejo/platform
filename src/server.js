@@ -263,7 +263,7 @@ export function build() {
     }
     return reply.type('text/html').header('cache-control', 'public, max-age=60').send(page({ mode: 'store', site: s.slug }, seo));
   };
-  app.get('/', storePage); app.get('/p/:slug', storePage); app.get('/track', storePage); app.get('/thanks', storePage); app.get('/pages/:page', storePage); app.get('/collections/all', storePage);
+  app.get('/', storePage); app.get('/p/:slug', storePage); app.get('/lp/:slug', storePage); app.get('/track', storePage); app.get('/thanks', storePage); app.get('/pages/:page', storePage); app.get('/collections/all', storePage);
   });
   return app;
 }

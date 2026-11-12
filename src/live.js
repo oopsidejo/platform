@@ -41,7 +41,7 @@ export async function loadState(c, { mode, siteId, staff }) {
     ingredients: p.ingredients || '', usage: p.usage || '', price: num(p.price_jod), old: num(p.old_price_jod), stock: p.stock, min: p.min_stock, stockAt: ms(p.stock_updated_at),
     emoji: p.emoji || '🛍️', bg: p.bg || '#e5e7eb', best: p.best, badge: p.badge || '', offerEnd: dstr(p.offer_end),
     options: optsToProto(p.options), imgs: p.images || [], videos: p.videos || [], benefits: p.benefits || [], story: p.story || [], faq: p.faq || [],
-    lp: Object.keys(p.landing || {}).length ? p.landing : null, vis: mode === 'store' ? (p.vis[siteId] ? { [siteId]: p.vis[siteId] } : {}) : (p.vis || {}), tiers: p.tiers || [], upsell: Object.keys(p.upsell || {}).length ? p.upsell : { pid: '', pct: 10 },
+    ...(() => { const l = { ...(p.landing || {}) }, cd = l._cd || {}; delete l._cd; return { lp: Object.keys(l).length ? l : null, cdMode: cd.mode || 'off', cdHours: cd.hours || 24, cdText: cd.text || '', cdTextEn: cd.textEn || '' }; })(), vis: mode === 'store' ? (p.vis[siteId] ? { [siteId]: p.vis[siteId] } : {}) : (p.vis || {}), tiers: p.tiers || [], upsell: Object.keys(p.upsell || {}).length ? p.upsell : { pid: '', pct: 10 },
     guarantee: p.guarantee || '', seoT: p.seo_title || '', seoD: p.seo_desc || '', active: p.active, ...(mode === 'store' ? { _today: today[p.id] || 0 } : {}) }));
   S.statuses = (await q(`select * from order_statuses order by sort,name`)).map(s => ({ id: s.id, name: s.name, color: s.color, kind: s.kind }));
   S.currencies = (await q(`select * from currencies order by code='JOD' desc, code`)).map(c => ({ code: c.code, symbol: c.symbol, rate: num(c.rate), manual: c.manual }));
@@ -158,7 +158,7 @@ export async function applySync(c, st, body, ctx) {
       options=$19,images=$20,videos=$21,benefits=$22,story=$23,faq=$24,landing=$25,tiers=$26,upsell=$27,guarantee=$28,seo_title=$29,seo_desc=$30`,
       [x.id, nul(String(x.slug || '').trim()), x.name, x.name_en || null, x.cat || null, x.desc || '', x.desc_en || '', x.ingredients || '', x.usage || '', num(x.price), num(x.old) || null, Math.max(0, Math.floor(num(x.stock))), Math.floor(num(x.min)),
        x.emoji || null, x.bg || null, !!x.best, x.badge || null, nul(x.offerEnd), JSON.stringify(optsToDb(x.options)), JSON.stringify(x.imgs || []), JSON.stringify((x.videos || []).filter(v => v.url)),
-       JSON.stringify(x.benefits || []), JSON.stringify(x.story || []), JSON.stringify(x.faq || []), JSON.stringify(lp), JSON.stringify(x.tiers || []), JSON.stringify(x.upsell || {}), x.guarantee || '', x.seoT || '', x.seoD || '']);
+       JSON.stringify(x.benefits || []), JSON.stringify(x.story || []), JSON.stringify(x.faq || []), JSON.stringify({ ...lp, _cd: { mode: x.cdMode || 'off', hours: num(x.cdHours) || 24, text: String(x.cdText || '').slice(0, 120), textEn: String(x.cdTextEn || '').slice(0, 120) } }), JSON.stringify(x.tiers || []), JSON.stringify(x.upsell || {}), x.guarantee || '', x.seoT || '', x.seoD || '']);
     const vis = x.vis || {};
     await q(`delete from site_products where product_id=$1 and not (site_id = any($2::uuid[]))`, [x.id, Object.keys(vis).filter(isUuid)]);
     for (const [sid, v] of Object.entries(vis)) if (isUuid(sid) && v) await q(`insert into site_products(site_id,product_id,active,price_override,sort) select $1,$2,$3,$4,$5 where exists(select 1 from sites where id=$1)
