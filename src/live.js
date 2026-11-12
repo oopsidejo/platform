@@ -250,7 +250,8 @@ export function page(appCfg, seo) {
   if (!HTML || env.NODE_ENV !== 'production') HTML = fs.readFileSync(new URL('../public/app.html', import.meta.url), 'utf8');
   const esc = s => String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const inj = `<script>window.APP=${JSON.stringify(appCfg).replace(/</g, '\\u003c')};</script><script>`;
-  let h = HTML.replace('<script>', () => inj);
+  const pwa = appCfg.mode === 'admin' ? `<link rel="manifest" href="/admin/manifest.webmanifest"><meta name="theme-color" content="#4f46e5"><link rel="apple-touch-icon" href="/icons/apple-180.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="لوحة التحكم"><link rel="icon" href="/icons/icon-192.png">` : '';
+  let h = HTML.replace('</head>', pwa + '</head>').replace('<script>', () => inj);
   if (seo) {
     const head = `<title>${esc(seo.title)}</title><meta name="description" content="${esc(seo.desc)}"><meta property="og:title" content="${esc(seo.title)}"><meta property="og:description" content="${esc(seo.desc)}">${seo.img ? `<meta property="og:image" content="${esc(seo.img)}">` : ''}${seo.ld ? `<script type="application/ld+json">${JSON.stringify(seo.ld).replace(/</g, '\\u003c')}</script>` : ''}`;
     h = h.replace(/<title>[^<]*<\/title>/, () => head);

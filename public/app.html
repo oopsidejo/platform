@@ -1276,6 +1276,14 @@ async function api(url,body,method){const h={'content-type':'application/json'};
  const r=await fetch(url,{method:method||(body?'POST':'GET'),headers:h,body:body?JSON.stringify(body):undefined});
  if(r.status===401&&LV.tok){if(!api._r&&await lvRefresh()){api._r=1;try{return await api(url,body,method)}finally{api._r=0}}lvLogout();throw new Error('انتهت الجلسة، سجّل دخول مرة ثانية')}
  let j={};try{j=await r.json()}catch{}if(r.status===403)throw new Error('حسابك غير مضاف كموظف');if(!r.ok||j.ok===false)throw new Error(j.error||('خطأ '+r.status));return j}
+// ===== تطبيق ويب (PWA) =====
+let PWA_EV=null;const pwaStandalone=()=>matchMedia('(display-mode: standalone)').matches||navigator.standalone===true;const pwaIOS=()=>/iphone|ipad|ipod/i.test(navigator.userAgent);
+function pwaBtn(){if(!LIVE||LIVE.mode!=='admin'||pwaStandalone())return'';return`<button id="pwabtn" class="nv" style="font-size:12px;margin-top:6px;${PWA_EV||pwaIOS()?'':'display:none'}" onclick="pwaInstall()">📲 تثبيت التطبيق</button>`}
+async function pwaInstall(){if(PWA_EV){PWA_EV.prompt();const r=await PWA_EV.userChoice;PWA_EV=null;const b=document.getElementById('pwabtn');if(b&&r.outcome==='accepted')b.remove();return}
+ const ios=pwaIOS();alert(ios?'على الآيفون: افتح الرابط من Safari ← اضغط زر المشاركة (⬆️) ← "إضافة إلى الشاشة الرئيسية" ← إضافة':'من قائمة المتصفح (⋮) اختار "تثبيت التطبيق" أو "إضافة إلى الشاشة الرئيسية"')}
+if(window.APP&&window.APP.mode==='admin'){addEventListener('beforeinstallprompt',e=>{e.preventDefault();PWA_EV=e;const b=document.getElementById('pwabtn');if(b)b.style.display=''});
+ addEventListener('appinstalled',()=>{const b=document.getElementById('pwabtn');if(b)b.remove()});
+ if('serviceWorker'in navigator)addEventListener('load',()=>navigator.serviceWorker.register('/admin-sw.js',{scope:'/admin'}).catch(()=>{}))}
 function lvInd(t,c){['lvind','blvind'].forEach(i=>{const e=document.getElementById(i);if(e){e.textContent=t;e.style.color=c||''}})}
 function liveSave(){try{localStorage.setItem('lv-ui',JSON.stringify(S.ui))}catch{}if(LIVE.mode!=='admin'||!LV.base)return;LV.dirty=true;clearTimeout(LV.timer);LV.timer=setTimeout(lvFlush,1000);lvInd('● تعديلات غير محفوظة','#d97706')}
 function lvFlush(){clearTimeout(LV.timer);return LV.q=(LV.q||Promise.resolve()).then(lvFlush1)}
@@ -1324,7 +1332,7 @@ async function lvBoot(){if(LIVE.mode==='store')return storeBoot();
 function lvOverrides(){if(lvOverrides.done)return;lvOverrides.done=1;
  const _render=render;render=function(){_render();if(LIVE.mode!=='admin')return;const sd=document.getElementById('side');if(!sd)return;
   sd.querySelectorAll('select').forEach(s=>{if((s.getAttribute('onchange')||'').includes('S.me=')){const l=s.previousElementSibling;if(l&&l.tagName==='LABEL')l.remove();s.remove()}});
-  sd.querySelectorAll('button').forEach(b=>{if((b.getAttribute('onclick')||'').includes('seed()'))b.outerHTML=`<div style="margin-top:10px;padding:8px;font-size:12px"><div>👤 ${esc(me().name)}</div><div id="lvind" style="margin:4px 0">${LV.dirty?'● تعديلات غير محفوظة':'✓ محفوظ'}</div><button class="nv" style="font-size:12px" onclick="lvLogout()">تسجيل الخروج</button></div>`})};
+  sd.querySelectorAll('button').forEach(b=>{if((b.getAttribute('onclick')||'').includes('seed()'))b.outerHTML=`<div style="margin-top:10px;padding:8px;font-size:12px"><div>👤 ${esc(me().name)}</div><div id="lvind" style="margin:4px 0">${LV.dirty?'● تعديلات غير محفوظة':'✓ محفوظ'}</div><button class="nv" style="font-size:12px" onclick="lvLogout()">تسجيل الخروج</button>${pwaBtn()}</div>`})};
  const _stockSet=stockSet;stockSet=function(pid,qty,why){_stockSet(pid,qty,why);if(LIVE.mode!=='admin'||LV.noStockAct)return;const p=prod(pid);
   const qty2=p.stock;LV.q=lvFlush().then(()=>api('/admin/action',{type:'stock',pid,qty:qty2,reason:(why&&why.t)||'تعديل يدوي'})).catch(e=>toast('لم يُحفظ المخزون: '+e.message))};
  const _setSt=setSt;setSt=async function(id,s){const o=S.orders.find(x=>x.id===id);try{await api('/admin/action',{type:'status',order:id,status:s,who:me().name})}catch(e){toast(e.message);orderDetail(id);return}

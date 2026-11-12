@@ -5,6 +5,7 @@ import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import pg from 'pg';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import { loadState, applySync, can, page } from './live.js';
 
 const env = process.env;
@@ -229,6 +230,14 @@ export function build() {
   };
   const createUser = async (email, password) => (await authAdmin('users', 'POST', { email, password, email_confirm: true })).id;
   const setPassword = async (id, password) => { await authAdmin('users/' + id, 'PUT', { password }); };
+  // ===== تطبيق ويب (PWA) للوحة =====
+  const PUB = new URL('../public/', import.meta.url);
+  app.get('/admin/manifest.webmanifest', async (req, reply) => reply.type('application/manifest+json').header('cache-control', 'public, max-age=3600').send(JSON.stringify({
+    name: 'لوحة التحكم — منصة المواقع', short_name: 'لوحة التحكم', start_url: '/admin', scope: '/admin', display: 'standalone', dir: 'rtl', lang: 'ar',
+    background_color: '#f3f4f8', theme_color: '#4f46e5',
+    icons: [{ src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png' }, { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png' }, { src: '/icons/maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }] })));
+  app.get('/admin-sw.js', async (req, reply) => reply.type('application/javascript').header('cache-control', 'no-cache').send(fs.readFileSync(new URL('sw.js', PUB))));
+  app.get('/icons/:f', async (req, reply) => { const f = String(req.params.f); if (!/^[a-z0-9-]+\.png$/.test(f)) return reply.code(404).send(); try { return reply.type('image/png').header('cache-control', 'public, max-age=604800').send(fs.readFileSync(new URL('icons/' + f, PUB))) } catch { return reply.code(404).send() } });
   app.get('/admin', async (req, reply) => reply.type('text/html').header('cache-control', 'no-store').send(page({ mode: 'admin', sb: SB, anon: ANON })));
   app.get('/admin/me', async (req, reply) => { const st = await staffOf(req, reply); return st ? { ok: true, id: st.user_id, name: st.name, role: st.role } : { ok: false }; });
   app.get('/admin/state', async (req, reply) => {
