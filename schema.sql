@@ -7,7 +7,7 @@
 -- ---------- مرجعيات عامة ----------
 create table currencies(code text primary key, symbol text not null, rate numeric not null default 1 check(rate>0),
   manual boolean not null default false, updated_at timestamptz not null default now());
-create table payment_methods(id text primary key, name text not null, instructions text not null default '', active boolean not null default true, sort int not null default 0);
+create table payment_methods(id text primary key, name text not null, instructions text not null default '', active boolean not null default true, sort int not null default 0, cfg jsonb not null default '{}');
 create table countries(id text primary key, name text not null, flag text, currency text references currencies(code), active boolean not null default true, sort int not null default 0);
 create table couriers(id uuid primary key default gen_random_uuid(), type text not null check(type in('driver','company')), name text not null, phone text,
   vehicle text, cost_jod numeric not null default 0, countries text[] not null default '{}', areas text[] not null default '{}', tracking_url text, notes text, active boolean not null default true);
@@ -50,7 +50,7 @@ create table subscribers(id uuid primary key default gen_random_uuid(), site_id 
 -- ---------- الطلبات والتوصيل ----------
 create table orders(id uuid primary key default gen_random_uuid(), order_no bigint generated always as identity (start with 10001), site_id uuid not null references sites(id),
   customer_name text not null, phone text not null, country_id text not null references countries(id), governorate_id uuid references governorates(id), governorate_name text,
-  area text, address text, payment_method text not null references payment_methods(id), currency text not null, fx_rate numeric not null default 1,
+  area text, address text, payment_method text not null references payment_methods(id), currency text not null, fx_rate numeric not null default 1, receipts jsonb not null default '[]', pay_discount_jod numeric not null default 0,
   subtotal_jod numeric not null, shipping_jod numeric not null, discount_jod numeric not null default 0, total_jod numeric not null, coupon_code text, customer_note text, tier_discount_jod numeric not null default 0, flags text[] not null default '{}', assignee uuid, ref_code text,
   status_id uuid references order_statuses(id), note text, utm jsonb, created_at timestamptz not null default now());
 create index on orders(site_id,created_at desc); create index on orders(status_id); create index if not exists orders_phone9_idx on orders(right(phone,9));
@@ -73,6 +73,11 @@ create table wa_templates(status_id uuid primary key references order_statuses(i
 create table ad_spend(key text primary key, site_id uuid references sites(id) on delete cascade, spend_jod numeric not null default 0, updated_at timestamptz not null default now());
 create table restock_requests(id uuid primary key default gen_random_uuid(), site_id uuid not null references sites(id) on delete cascade, product_id uuid not null references products(id) on delete cascade, phone text not null, done boolean not null default false, created_at timestamptz not null default now());
 
+-- ---------- OTP (v1.7) ----------
+create table otp_codes(id bigint generated always as identity primary key, site_id uuid not null references sites(id) on delete cascade, phone9 text not null,
+  code_hash text not null, expires_at timestamptz not null, attempts int not null default 0, token text, verified_at timestamptz, failed boolean not null default false, created_at timestamptz not null default now());
+create index otp_codes_phone_idx on otp_codes(site_id, phone9, created_at desc);
+
 -- ---------- المخزون والإشعارات والتسويات ----------
 create table stock_log(id bigint generated always as identity primary key, product_id uuid references products(id) on delete set null, product_name text, by_name text not null,
   before_qty int not null, after_qty int not null, reason text not null default 'تعديل يدوي', created_at timestamptz not null default now());
@@ -93,7 +98,7 @@ create or replace function public.staff_can(perm text, sid uuid default null) re
 -- ---------- RLS ----------
 do $$ declare t text; begin
  for t in select unnest(array['currencies','payment_methods','countries','couriers','courier_secrets','governorates','country_payment_methods','order_statuses','sites','site_countries','site_currencies','design_versions',
-  'products','site_products','coupons','coupon_sites','reviews','subscribers','orders','order_items','order_status_history','order_deliveries','stock_log','notifications','settlements','leads','blacklist','tasks','wa_templates','ad_spend','restock_requests','staff','activity_log','integrations']) loop
+  'products','site_products','coupons','coupon_sites','reviews','subscribers','orders','order_items','order_status_history','order_deliveries','stock_log','notifications','settlements','otp_codes','leads','blacklist','tasks','wa_templates','ad_spend','restock_requests','staff','activity_log','integrations']) loop
   execute format('alter table %I enable row level security',t); end loop; end $$;
 -- قراءة عامة (الزوار)
 create policy pub_cur on currencies for select to anon,authenticated using(true);
@@ -155,7 +160,7 @@ create or replace function public.create_order(payload jsonb) returns jsonb lang
 declare v_site sites; v_gov governorates; v_cur currencies; v_cp coupons; v_st order_statuses; v_ord orders;
  it jsonb; op jsonb; v_prod products; v_sp site_products; v_unit numeric; v_opts text; v_val jsonb; v_grp jsonb; v_tier jsonb;
  v_sub numeric:=0; v_ship numeric; v_disc numeric:=0; v_tdisc numeric:=0; v_qty int; v_items jsonb:='[]'; v_name text; v_phone text; v_ph9 text; v_before int;
- v_main products; v_after numeric; v_net numeric; v_freeprod boolean:=false; v_flags text[]:='{}'; v_fs jsonb; v_ref text; v_up boolean;
+ v_main products; v_after numeric; v_net numeric; v_freeprod boolean:=false; v_pm payment_methods; v_pdisc numeric:=0; v_rc jsonb; v_r jsonb; v_flags text[]:='{}'; v_fs jsonb; v_ref text; v_up boolean;
 begin
  v_name:=btrim(coalesce(payload->>'name','')); v_phone:=regexp_replace(coalesce(payload->>'phone',''),'\D','','g'); v_ph9:=right(v_phone,9);
  if v_name='' or length(v_phone)<9 then raise exception 'بيانات العميل غير صحيحة'; end if;
@@ -164,6 +169,13 @@ begin
  if not exists(select 1 from site_countries where site_id=v_site.id and country_id=payload->>'country_id') then raise exception 'الدولة غير متاحة بهذا الموقع'; end if;
  select * into v_gov from governorates where id=(payload->>'governorate_id')::uuid and country_id=payload->>'country_id'; if not found then raise exception 'المحافظة غير صحيحة'; end if;
  if not exists(select 1 from country_payment_methods c join payment_methods p on p.id=c.method_id where c.country_id=payload->>'country_id' and c.method_id=payload->>'payment_method' and p.active) then raise exception 'طريقة الدفع غير متاحة'; end if;
+ select * into v_pm from payment_methods where id=payload->>'payment_method';
+ v_rc:=case when jsonb_typeof(payload->'receipts')='array' then payload->'receipts' else '[]'::jsonb end;
+ if jsonb_array_length(v_rc)>3 then raise exception 'الحد الأقصى 3 صور للإيصال'; end if;
+ for v_r in select * from jsonb_array_elements(v_rc) loop
+  if jsonb_typeof(v_r)<>'string' or (v_r#>>'{}') !~ '^receipts/[0-9]{4}-[0-9]{2}/[0-9a-f-]{36}\.(jpg|png|webp)$' then raise exception 'صورة الإيصال غير صالحة'; end if;
+ end loop;
+ if coalesce(v_pm.cfg->>'proof','off')='required' and jsonb_array_length(v_rc)=0 then raise exception 'ارفع صورة إيصال الدفع لإتمام الطلب'; end if;
  select * into v_cur from currencies where code=coalesce(payload->>'currency','JOD'); if not found then raise exception 'عملة غير صحيحة'; end if;
  if jsonb_array_length(coalesce(payload->'items','[]'))=0 then raise exception 'لا توجد منتجات'; end if;
  for it in select * from jsonb_array_elements(payload->'items') loop
@@ -205,12 +217,14 @@ begin
  end if;
  v_net:=greatest(v_after-v_disc,0); v_fs:=v_site.config->'freeShip';
  if coalesce((v_fs->>'on')::boolean,false) and coalesce((v_fs->>'min')::numeric,0)>0 and v_net>=(v_fs->>'min')::numeric then v_ship:=0; end if;
- if coalesce((v_fs->>'all')::boolean,false) or v_freeprod then v_ship:=0; end if;
+ if coalesce((v_fs->>'all')::boolean,false) or v_freeprod or coalesce((v_pm.cfg->>'freeShip')::boolean,false) then v_ship:=0; end if;
+ if coalesce(v_pm.cfg->>'dtype','none')='pct' then v_pdisc:=v_net*least(greatest(coalesce((v_pm.cfg->>'dval')::numeric,0),0),100)/100;
+ elsif v_pm.cfg->>'dtype'='fix' then v_pdisc:=least(greatest(coalesce((v_pm.cfg->>'dval')::numeric,0),0),v_net); end if;
  if exists(select 1 from orders o join order_statuses s on s.id=o.status_id where right(o.phone,9)=v_ph9 and o.created_at>now()-interval '7 days' and s.kind<>'cancel') then v_flags:=array_append(v_flags,'dup'); end if;
  if exists(select 1 from orders o join order_statuses s on s.id=o.status_id left join order_deliveries d on d.order_id=o.id where right(o.phone,9)=v_ph9 and (s.kind='cancel' or d.status='failed')) then v_flags:=array_append(v_flags,'bad'); end if;
  select * into v_st from order_statuses order by sort,name limit 1;
- insert into orders(site_id,customer_name,phone,country_id,governorate_id,governorate_name,area,address,payment_method,currency,fx_rate,subtotal_jod,shipping_jod,discount_jod,tier_discount_jod,total_jod,coupon_code,customer_note,flags,status_id,utm)
- values(v_site.id,v_name,v_phone,payload->>'country_id',v_gov.id,v_gov.name,payload->>'area',payload->>'address',payload->>'payment_method',v_cur.code,v_cur.rate,v_sub,v_ship,v_disc,v_tdisc,v_net+v_ship,v_cp.code,nullif(btrim(coalesce(payload->>'note','')),''),v_flags,v_st.id,payload->'utm') returning * into v_ord;
+ insert into orders(site_id,customer_name,phone,country_id,governorate_id,governorate_name,area,address,payment_method,currency,fx_rate,subtotal_jod,shipping_jod,discount_jod,tier_discount_jod,total_jod,coupon_code,customer_note,flags,status_id,utm,receipts,pay_discount_jod)
+ values(v_site.id,v_name,v_phone,payload->>'country_id',v_gov.id,v_gov.name,payload->>'area',payload->>'address',payload->>'payment_method',v_cur.code,v_cur.rate,v_sub,v_ship,v_disc,v_tdisc,greatest(v_net-v_pdisc,0)+v_ship,v_cp.code,nullif(btrim(coalesce(payload->>'note','')),''),v_flags,v_st.id,payload->'utm',v_rc,v_pdisc) returning * into v_ord;
  insert into order_items(order_id,product_id,name,options_text,qty,unit_price_jod) select v_ord.id,(x->>'product_id')::uuid,x->>'name',x->>'opts',(x->>'qty')::int,(x->>'unit')::numeric from jsonb_array_elements(v_items) x;
  insert into order_status_history(order_id,status_id,by_name) values(v_ord.id,v_st.id,'الزبون');
  update leads set converted=true, updated_at=now() where site_id=v_site.id and right(regexp_replace(phone,'\D','','g'),9)=v_ph9 and not converted;
@@ -226,7 +240,7 @@ begin
  if v_gov.default_courier is not null and exists(select 1 from couriers where id=v_gov.default_courier and active) then
   insert into order_deliveries(order_id,courier_id,cost_jod) select v_ord.id,id,cost_jod from couriers where id=v_gov.default_courier; end if;
  insert into notifications(body) values('🧾 طلب جديد #'||v_ord.order_no||' — '||v_site.name||E'\n'||v_name||' '||v_phone||' — '||v_ord.total_jod||' د.أ'||case when v_ord.customer_note is not null then E'\n📝 '||v_ord.customer_note else '' end||case when cardinality(v_flags)>0 then E'\n⚠️ '||array_to_string(v_flags,', ') else '' end);
- return jsonb_build_object('order_id',v_ord.id,'order_no',v_ord.order_no,'total_jod',v_ord.total_jod,'tier_discount_jod',v_tdisc,'shipping_jod',v_ship,'currency',v_cur.code,'fx_rate',v_cur.rate,'flags',to_jsonb(v_flags),'ref_code',v_ref);
+ return jsonb_build_object('order_id',v_ord.id,'order_no',v_ord.order_no,'total_jod',v_ord.total_jod,'tier_discount_jod',v_tdisc,'pay_discount_jod',v_pdisc,'shipping_jod',v_ship,'currency',v_cur.code,'fx_rate',v_cur.rate,'flags',to_jsonb(v_flags),'ref_code',v_ref);
 end $$;
 -- حفظ/تحديث طلب غير مكتمل (من الباك إند عند كتابة الاسم والرقم)
 create or replace function public.save_lead(p_site uuid, p_product uuid, p_name text, p_phone text, p_utm jsonb default null) returns void language plpgsql security definer set search_path=public as $$

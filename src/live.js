@@ -15,6 +15,8 @@ const optsToDb = o => (o || []).filter(g => (g.name || '').trim() && (g.vals || 
 const dstr = d => !d ? '' : typeof d === 'string' ? d.slice(0, 10) : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 // أرقام numeric داخل نصوص الإشعارات (50.08500000000000000000 → 50.09)
 const tidyNum = t => String(t || '').replace(/(\d+\.\d{3,})/g, m => String(Math.round(parseFloat(m) * 100) / 100));
+const pmCfg = c => { c = c || {}; const s = (v, n) => String(v || '').slice(0, n); return { alias: s(c.alias, 60), bank: s(c.bank, 80), holder: s(c.holder, 80), iban: s(c.iban, 60), extra: s(c.extra, 400),
+  dtype: ['pct', 'fix'].includes(c.dtype) ? c.dtype : 'none', dval: Math.max(0, +c.dval || 0), freeShip: !!c.freeShip, proof: ['off', 'optional', 'required'].includes(c.proof) ? c.proof : 'off', badge: s(c.badge, 40) }; };
 const SITE_COLS = ['id', 'name', 'slug', 'domain', 'wa', 'countries', 'currencies'];
 
 // ---------- قراءة ----------
@@ -48,7 +50,7 @@ export async function loadState(c, { mode, siteId, staff }) {
     guarantee: p.guarantee || '', seoT: p.seo_title || '', seoD: p.seo_desc || '', active: p.active, ...(mode === 'store' ? { _today: today[p.id] || 0 } : {}) }));
   S.statuses = (await q(`select * from order_statuses order by sort,name`)).map(s => ({ id: s.id, name: s.name, color: s.color, kind: s.kind }));
   S.currencies = (await q(`select * from currencies order by code='JOD' desc, code`)).map(c => ({ code: c.code, symbol: c.symbol, rate: num(c.rate), manual: c.manual }));
-  S.payMethods = (await q(`select * from payment_methods ${mode === 'store' ? 'where active' : ''} order by sort,id`)).map(m => ({ id: m.id, name: m.name, instr: m.instructions || '' }));
+  S.payMethods = (await q(`select * from payment_methods ${mode === 'store' ? 'where active' : ''} order by sort,id`)).map(m => ({ id: m.id, name: m.name, instr: m.instructions || '', cfg: m.cfg || {} }));
   const cpm = await q(`select * from country_payment_methods`);
   const govs = await q(`select * from governorates order by sort,name`);
   S.countries = (await q(`select * from countries ${mode === 'store' ? 'where active' : ''} order by sort,name`)).map(c => ({ id: c.id, name: c.name, flag: c.flag || '', cur: c.currency || 'JOD', on: c.active,
@@ -78,7 +80,7 @@ export async function loadState(c, { mode, siteId, staff }) {
     id: o.id, no: +o.order_no, site: o.site_id, name: o.customer_name, phone: o.phone, country: o.country_id, govId: o.governorate_id || '', gov: o.governorate_name || '', area: o.area || '', address: o.address || '',
     pay: o.payment_method, cur: o.currency, items: o.items.map(i => ({ ...i, unit: num(i.unit) })), sub: num(o.subtotal_jod), ship: num(o.shipping_jod), disc: num(o.discount_jod), tdisc: num(o.tier_discount_jod),
     total: num(o.total_jod), coupon: o.coupon_code || '', status: o.status_id, at: ms(o.created_at), note: o.note || '', cnote: o.customer_note || '', utm: o.utm || null, flags: o.flags || [],
-    assignee: o.assignee || '', refCode: o.ref_code || '', history: o.hist.map(h => ({ at: ms(h.at), st: h.st, who: h.who })),
+    assignee: o.assignee || '', receipts: o.receipts || [], pdisc: num(o.pay_discount_jod), refCode: o.ref_code || '', history: o.hist.map(h => ({ at: ms(h.at), st: h.st, who: h.who })),
     dl: o.dl ? { cid: o.dl.courier_id, no: o.dl.tracking_no || '', cost: num(o.dl.cost_jod), st: o.dl.status, at: ms(o.dl.assigned_at), settled: o.dl.settled, reason: o.dl.failed_reason || '' } : null }));
   S.subs = (await q(`select * from subscribers where ${inScope('site_id')} order by created_at desc`, sp)).map(s => ({ id: s.id, site: s.site_id, name: s.name || '', email: s.email || '', phone: s.phone, at: ms(s.created_at) }));
   S.staff = (await q(`select s.*, u.email from staff s left join auth.users u on u.id=s.user_id order by s.role, s.name`)).map(s => ({ id: s.user_id, name: s.name, email: adminAll || can(staff, 'settings') || s.user_id === staff.user_id ? s.email || '' : '', role: s.role,
@@ -123,7 +125,7 @@ export async function applySync(c, st, body, ctx) {
 
   // العملات أولاً (الدول تعتمد عليها)
   for (const x of U('currencies')) await q(`insert into currencies(code,symbol,rate,manual) values($1,$2,$3,$4) on conflict(code) do update set symbol=$2,rate=$3,manual=$4,updated_at=now()`, [x.code, x.symbol, num(x.rate) || 1, !!x.manual]);
-  for (const x of U('payMethods')) await q(`insert into payment_methods(id,name,instructions,sort) values($1,$2,$3,$4) on conflict(id) do update set name=$2,instructions=$3,sort=$4`, [x.id, x.name, x.instr || '', x._i || 0]);
+  for (const x of U('payMethods')) await q(`insert into payment_methods(id,name,instructions,sort,cfg) values($1,$2,$3,$4,$5) on conflict(id) do update set name=$2,instructions=$3,sort=$4,cfg=$5`, [x.id, x.name, x.instr || '', x._i || 0, pmCfg(x.cfg)]);
   for (const x of U('couriers')) { if (!isUuid(x.id)) continue;
     await q(`insert into couriers(id,type,name,phone,vehicle,cost_jod,countries,areas,tracking_url,notes,active) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
       on conflict(id) do update set type=$2,name=$3,phone=$4,vehicle=$5,cost_jod=$6,countries=$7,areas=$8,tracking_url=$9,notes=$10,active=$11`,

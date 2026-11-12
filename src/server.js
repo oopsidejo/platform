@@ -8,6 +8,20 @@ import crypto from 'node:crypto';
 import { loadState, applySync, can, page } from './live.js';
 
 const env = process.env;
+const DIAL = { jo: '962', ps: '970', sy: '963', lb: '961', sa: '966', iq: '964', eg: '20', ae: '971', kw: '965', qa: '974', il: '972' };
+const PHRX = { jo: /^0?7[789]\d{7}$/, ps: /^0?5[69]\d{7}$/ };
+const ph9 = p => String(p || '').replace(/\D/g, '').slice(-9);
+const toE164 = (p, cid) => { let d = String(p || '').replace(/\D/g, ''); const dc = DIAL[cid] || '962'; if (d.startsWith('00')) d = d.slice(2); if (d.startsWith(dc)) return '+' + d; return '+' + dc + d.replace(/^0+/, ''); };
+const phoneOk = (p, cid) => { let d = String(p || '').replace(/\D/g, ''); const dc = DIAL[cid]; if (dc && d.startsWith(dc)) d = '0' + d.slice(dc.length); else if (dc && d.startsWith('00' + dc)) d = '0' + d.slice(dc.length + 2); return PHRX[cid] ? PHRX[cid].test(d) : d.length >= 8 && d.length <= 13; };
+const OTP_SECRET = () => env.OTP_SECRET || env.SUPABASE_SERVICE_KEY || 'otp';
+const hashCode = (c, p) => crypto.createHash('sha256').update(OTP_SECRET() + ':' + p + ':' + c).digest('hex');
+async function sendSms(to, text) {
+  if (!env.SMSGATE_USER || !env.SMSGATE_PASS) throw new Error('nogw');
+  const r = await fetch((env.SMSGATE_URL || 'https://api.sms-gate.app/3rdparty/v1') + '/messages', { method: 'POST', headers: { authorization: 'Basic ' + Buffer.from(env.SMSGATE_USER + ':' + env.SMSGATE_PASS).toString('base64'), 'content-type': 'application/json' },
+    body: JSON.stringify({ textMessage: { text }, phoneNumbers: [to], ttl: 600 }) });
+  if (!r.ok) throw new Error('gw ' + r.status);
+}
+const RCPT = /^receipts\/[0-9]{4}-[0-9]{2}\/[0-9a-f-]{36}\.(jpg|png|webp)$/;
 // عمود date يرجع كنص YYYY-MM-DD (بدون تحويل لمنطقة زمنية → لا ينزاح التاريخ يوماً)
 pg.types.setTypeParser(1082, v => v);
 const pool = new pg.Pool({
@@ -86,15 +100,27 @@ export function build() {
     const reqd = Array.isArray(ff) ? ff.filter(f => f && f.on && f.req && keyOf[f.k]).map(f => keyOf[f.k]) : ['name', 'area', 'address'];
     if (reqd.some(k => !String(b[k] || '').trim())) return fail(reply, 'هذا الحقل مطلوب', 400);
     if (!String(b.name || '').trim()) b.name = 'زبون';
+    const vf = (s.config || {}).verify || {}, p9 = ph9(b.phone); let extraFlags = [];
+    if (vf.phoneCheck !== false && !phoneOk(b.phone, String(b.country_id || 'jo'))) return fail(reply, 'رقم الهاتف غير صحيح', 400);
+    const maxDay = +vf.maxPerDay || 0;
+    if (maxDay > 0) { const n = (await q(`select count(*)::int n from orders where site_id=$1 and right(regexp_replace(phone,'\\D','','g'),9)=$2 and created_at>now()-interval '24 hours'`, [s.id, p9]))[0].n;
+      if (n >= maxDay) return fail(reply, 'وصلت للحد الأقصى من الطلبات اليوم، تواصل معنا على واتساب', 429); }
+    if (vf.otp === 'sms') {
+      const ok = b.otp_token && (await q(`delete from otp_codes where site_id=$1 and phone9=$2 and token=$3 and verified_at>now()-interval '30 minutes' returning id`, [s.id, p9, String(b.otp_token)])).length;
+      if (!ok) { const failed = (await q(`select 1 from otp_codes where site_id=$1 and phone9=$2 and failed and expires_at>now() limit 1`, [s.id, p9])).length;
+        if (!failed) return fail(reply, 'أكّد رقمك بالكود أولاً', 400); extraFlags.push('nootp'); }
+    }
     const payload = {
       site_id: s.id, name: str(b.name, 80), phone: str(b.phone, 25), country_id: str(b.country_id, 60), governorate_id: str(b.governorate_id, 40),
       area: str(b.area, 120), address: str(b.address, 300), payment_method: str(b.payment_method, 60), currency: str(b.currency, 8) || 'JOD',
       coupon: str(b.coupon, 40), note: str(b.note, 1000), utm: cleanUtm(b.utm),
+      receipts: Array.isArray(b.receipts) ? b.receipts.filter(x => RCPT.test(String(x))).slice(0, 3) : [],
       items: Array.isArray(b.items) ? b.items.slice(0, 20).map(i => ({ product_id: (i || {}).product_id, qty: Math.max(1, Math.min(999, Math.floor(+(i || {}).qty || 1))), options: Array.isArray((i || {}).options) ? i.options.slice(0, 10).map(o => ({ name: str((o || {}).name, 80), label: str((o || {}).label, 80) })) : [], upsell: !!(i || {}).upsell })) : [],
     };
     if (!isUuid(payload.governorate_id) || payload.items.some(i => !isUuid(i.product_id))) return fail(reply, 'بيانات الطلب غير صحيحة');
     try {
       const r = (await q('select create_order($1::jsonb) r', [payload]))[0].r;
+      if (extraFlags.length) await q(`update orders set flags=flags||$2::text[] where id=$1`, [r.order_id, extraFlags]);
       // تفاصيل محسوبة بالخادم لصفحة الشكر (الخصم والمجموع والمنتجات كما حُفظت فعلاً)
       try { const d = (await q(`select o.subtotal_jod, o.discount_jod, (select jsonb_agg(jsonb_build_object('pid',i.product_id,'name',i.name,'opts',coalesce(i.options_text,''),'qty',i.qty,'unit',i.unit_price_jod) order by i.id) from order_items i where i.order_id=o.id) items from orders o where o.id=$1`, [r.order_id]))[0];
         if (d) { r.subtotal_jod = +d.subtotal_jod; r.discount_jod = +d.discount_jod; r.items = (d.items || []).map(i => ({ ...i, unit: +i.unit })); } } catch (e) { app.log.warn({ e: e.message }, 'order details'); }
@@ -241,6 +267,65 @@ export function build() {
     catch (e) { return fail(reply, 'تعذّر الاتصال بمخزن الصور (تأكد من SUPABASE_URL)', 502); }
     if (!r.ok) { const t = (await r.text()).slice(0, 150); return fail(reply, /bucket/i.test(t) ? 'مخزن الصور غير جاهز: أنشئ Bucket عام باسم media في Supabase Storage' : 'فشل رفع الملف: ' + t, 500); }
     return { ok: true, url: `${SB}/storage/v1/object/public/media/${path}` };
+  });
+
+  // ===== التحقق من الرقم OTP (رسائل من موبايل أندرويد عبر SMS Gateway) =====
+  app.post('/api/otp/send', { config: { rateLimit: { max: 5, timeWindow: '10 minutes' } } }, async (req, reply) => {
+    const b = req.body || {}; const s = await siteBy(b.site); if (!s) return fail(reply, 'الموقع غير موجود', 404);
+    const cid = String(b.country_id || 'jo'), p9 = ph9(b.phone);
+    if (!phoneOk(b.phone, cid)) return fail(reply, 'رقم الهاتف غير صحيح');
+    const n = (await q(`select count(*)::int n from otp_codes where site_id=$1 and phone9=$2 and created_at>now()-interval '1 hour'`, [s.id, p9]))[0].n;
+    if (n >= 4) return fail(reply, 'طلبت كود كثير، حاول بعد شوي');
+    const code = String(crypto.randomInt(1000, 10000));
+    try {
+      await sendSms(toE164(b.phone, cid), `كود تأكيد طلبك من ${s.name}: ${code}`);
+      await q(`insert into otp_codes(site_id,phone9,code_hash,expires_at) values($1,$2,$3,now()+interval '10 minutes')`, [s.id, p9, hashCode(code, p9)]);
+      return { ok: true };
+    } catch (e) {
+      app.log.warn({ e: e.message }, 'sms failed');
+      await q(`insert into otp_codes(site_id,phone9,code_hash,expires_at,failed) values($1,$2,'-',now()+interval '20 minutes',true)`, [s.id, p9]);
+      return { ok: true, skipped: true }; // البوابة معطّلة: نكمل الطلب بدون كود ونعلّمه
+    }
+  });
+  app.post('/api/otp/verify', { config: { rateLimit: { max: 15, timeWindow: '10 minutes' } } }, async (req, reply) => {
+    const b = req.body || {}; const s = await siteBy(b.site); if (!s) return fail(reply, 'الموقع غير موجود', 404);
+    const p9 = ph9(b.phone), r = (await q(`select * from otp_codes where site_id=$1 and phone9=$2 and not failed and expires_at>now() order by id desc limit 1`, [s.id, p9]))[0];
+    if (!r) return fail(reply, 'انتهت صلاحية الكود، اطلب كود جديد');
+    if (r.attempts >= 5) return fail(reply, 'محاولات كثيرة، اطلب كود جديد');
+    if (r.code_hash !== hashCode(String(b.code || '').replace(/\D/g, ''), p9)) { await q(`update otp_codes set attempts=attempts+1 where id=$1`, [r.id]); return fail(reply, 'الكود غير صحيح'); }
+    const token = crypto.randomBytes(16).toString('hex'); await q(`update otp_codes set token=$2, verified_at=now() where id=$1`, [r.id, token]);
+    return { ok: true, token };
+  });
+
+  // ===== إيصالات الدفع (Bucket خاص اسمه receipts) =====
+  async function putReceipt(dataUrl) {
+    const m = /^data:(image\/(png|jpe?g|webp));base64,(.+)$/s.exec(String(dataUrl || '')); if (!m) throw new Error('ارفع صورة فقط (JPG أو PNG)');
+    const buf = Buffer.from(m[3], 'base64'); if (buf.length > 4_000_000) throw new Error('حجم الصورة كبير');
+    if (!SVC || !SB) throw new Error('رفع الإيصالات غير مفعّل حالياً');
+    const ext = m[2].replace('jpeg', 'jpg'), key = `${new Date().toISOString().slice(0, 7)}/${crypto.randomUUID()}.${ext}`;
+    const r = await fetch(`${SB}/storage/v1/object/receipts/${key}`, { method: 'POST', headers: { apikey: SVC, authorization: 'Bearer ' + SVC, 'content-type': m[1] }, body: buf });
+    if (!r.ok) { const t = (await r.text()).slice(0, 150); throw new Error(/bucket/i.test(t) ? 'مخزن الإيصالات غير جاهز (أنشئ Bucket خاص باسم receipts)' : 'تعذّر رفع الصورة'); }
+    return 'receipts/' + key;
+  }
+  app.post('/api/receipt-upload', { bodyLimit: 6_000_000, config: { rateLimit: { max: 8, timeWindow: '1 minute' } } }, async (req, reply) => {
+    const b = req.body || {}; const s = await siteBy(b.site); if (!s) return fail(reply, 'الموقع غير موجود', 404);
+    try { return { ok: true, path: await putReceipt(b.data) }; } catch (e) { return fail(reply, e.message); }
+  });
+  // رفع إيصال بعد الطلب (من صفحة الشكر) — يتحقق من رقم الطلب والهاتف
+  app.post('/api/receipt', { bodyLimit: 6_000_000, config: { rateLimit: { max: 6, timeWindow: '1 minute' } } }, async (req, reply) => {
+    const b = req.body || {}; const s = await siteBy(b.site); if (!s) return fail(reply, 'الموقع غير موجود', 404);
+    const no = parseInt(String(b.order_no || '').replace(/\D/g, ''), 10), ph = String(b.phone || '').replace(/\D/g, '').slice(-9);
+    const o = (await q(`select id, receipts from orders where site_id=$1 and order_no=$2 and right(regexp_replace(phone,'\\D','','g'),9)=$3`, [s.id, no || 0, ph]))[0];
+    if (!o) return fail(reply, 'ما لقينا الطلب', 404); if ((o.receipts || []).length >= 3) return fail(reply, 'الحد الأقصى 3 صور');
+    try { const p = await putReceipt(b.data); await q(`update orders set receipts=receipts||to_jsonb($2::text) where id=$1`, [o.id, p]);
+      await q(`insert into notifications(body) values($1)`, [`📎 إيصال دفع جديد للطلب #${no}`]); return { ok: true }; } catch (e) { return fail(reply, e.message); }
+  });
+  app.get('/admin/receipt', async (req, reply) => {
+    const st = await staffOf(req, reply); if (!st) return { ok: false, error: 'غير مصرّح' };
+    const p = String(req.query.p || ''); if (!RCPT.test(p)) return fail(reply, 'مسار غير صالح');
+    const r = await fetch(`${SB}/storage/v1/object/sign/${p}`, { method: 'POST', headers: { apikey: SVC, authorization: 'Bearer ' + SVC, 'content-type': 'application/json' }, body: JSON.stringify({ expiresIn: 900 }) });
+    const j = await r.json().catch(() => ({})); if (!r.ok || !j.signedURL) return fail(reply, 'تعذّر فتح الإيصال', 500);
+    return { ok: true, url: SB + '/storage/v1' + j.signedURL };
   });
 
   // المتجر العام: الدومين يحدد الموقع (وإذا ما تطابق → أول موقع، مفيد لرابط onrender)
