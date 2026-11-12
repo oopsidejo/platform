@@ -79,9 +79,13 @@ export function build() {
   // إنشاء الطلب (آمن) + إرسال Purchase لميتا من الخادم
   app.post('/api/orders', strict, async (req, reply) => {
     const b = req.body || {};
-    const miss = ['name', 'phone', 'area', 'address'].find(k => !String(b[k] || '').trim());
-    if (miss) return fail(reply, 'هذا الحقل مطلوب', 400);
+    if (!String(b.phone || '').trim()) return fail(reply, 'رقم الهاتف مطلوب', 400);
     const s = await siteBy(b.site); if (!s) return fail(reply, 'الموقع غير موجود', 404);
+    // الحقول الإجبارية حسب إعداد «نموذج الطلب» للموقع (الافتراضي: الاسم والمنطقة والعنوان)
+    const ff = ((s.config || {}).form || {}).fields, keyOf = { name: 'name', area: 'area', address: 'address', note: 'note' };
+    const reqd = Array.isArray(ff) ? ff.filter(f => f && f.on && f.req && keyOf[f.k]).map(f => keyOf[f.k]) : ['name', 'area', 'address'];
+    if (reqd.some(k => !String(b[k] || '').trim())) return fail(reply, 'هذا الحقل مطلوب', 400);
+    if (!String(b.name || '').trim()) b.name = 'زبون';
     const payload = {
       site_id: s.id, name: str(b.name, 80), phone: str(b.phone, 25), country_id: str(b.country_id, 60), governorate_id: str(b.governorate_id, 40),
       area: str(b.area, 120), address: str(b.address, 300), payment_method: str(b.payment_method, 60), currency: str(b.currency, 8) || 'JOD',

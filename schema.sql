@@ -155,7 +155,7 @@ create or replace function public.create_order(payload jsonb) returns jsonb lang
 declare v_site sites; v_gov governorates; v_cur currencies; v_cp coupons; v_st order_statuses; v_ord orders;
  it jsonb; op jsonb; v_prod products; v_sp site_products; v_unit numeric; v_opts text; v_val jsonb; v_grp jsonb; v_tier jsonb;
  v_sub numeric:=0; v_ship numeric; v_disc numeric:=0; v_tdisc numeric:=0; v_qty int; v_items jsonb:='[]'; v_name text; v_phone text; v_ph9 text; v_before int;
- v_main products; v_after numeric; v_net numeric; v_flags text[]:='{}'; v_fs jsonb; v_ref text; v_up boolean;
+ v_main products; v_after numeric; v_net numeric; v_freeprod boolean:=false; v_flags text[]:='{}'; v_fs jsonb; v_ref text; v_up boolean;
 begin
  v_name:=btrim(coalesce(payload->>'name','')); v_phone:=regexp_replace(coalesce(payload->>'phone',''),'\D','','g'); v_ph9:=right(v_phone,9);
  if v_name='' or length(v_phone)<9 then raise exception 'بيانات العميل غير صحيحة'; end if;
@@ -189,6 +189,7 @@ begin
    if v_tier is not null then v_tdisc:=v_tdisc+case when v_tier->>'type'='half' then v_unit*floor(v_qty/2)*0.5 else v_unit*v_qty*coalesce((v_tier->>'val')::numeric,0)/100 end; end if;
    if v_main.id is null then v_main:=v_prod; end if;
   end if;
+  if not v_up and coalesce((v_prod.landing->>'_fs')::boolean,false) then v_freeprod:=true; end if;
   v_before:=v_prod.stock; update products set stock=stock-v_qty, stock_updated_at=now() where id=v_prod.id;
   insert into stock_log(product_id,product_name,by_name,before_qty,after_qty,reason) values(v_prod.id,v_prod.name,'النظام',v_before,v_before-v_qty,'بيع — طلب جديد');
   v_sub:=v_sub+v_unit*v_qty;
@@ -204,6 +205,7 @@ begin
  end if;
  v_net:=greatest(v_after-v_disc,0); v_fs:=v_site.config->'freeShip';
  if coalesce((v_fs->>'on')::boolean,false) and coalesce((v_fs->>'min')::numeric,0)>0 and v_net>=(v_fs->>'min')::numeric then v_ship:=0; end if;
+ if coalesce((v_fs->>'all')::boolean,false) or v_freeprod then v_ship:=0; end if;
  if exists(select 1 from orders o join order_statuses s on s.id=o.status_id where right(o.phone,9)=v_ph9 and o.created_at>now()-interval '7 days' and s.kind<>'cancel') then v_flags:=array_append(v_flags,'dup'); end if;
  if exists(select 1 from orders o join order_statuses s on s.id=o.status_id left join order_deliveries d on d.order_id=o.id where right(o.phone,9)=v_ph9 and (s.kind='cancel' or d.status='failed')) then v_flags:=array_append(v_flags,'bad'); end if;
  select * into v_st from order_statuses order by sort,name limit 1;
