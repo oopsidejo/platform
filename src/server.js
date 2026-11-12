@@ -269,6 +269,45 @@ export function build() {
     return { ok: true, url: `${SB}/storage/v1/object/public/media/${path}` };
   });
 
+  // ===== تحليل الزيارات =====
+  app.post('/api/ev', { bodyLimit: 4000, config: { rateLimit: { max: 90, timeWindow: '1 minute' } } }, async (req, reply) => {
+    let b = req.body || {}; if (typeof b === 'string') { try { b = JSON.parse(b) } catch { b = {} } }
+    const t = ['view', 'form', 'order'].includes(b.t) ? b.t : null, sid = String(b.sid || '').replace(/[^a-z0-9]/gi, '').slice(0, 24);
+    if (!t || sid.length < 8 || !isUuid(b.site)) return { ok: true };
+    const s = (await q(`select id from sites where id=$1 and active`, [b.site]))[0]; if (!s) return { ok: true };
+    if (/bot|crawl|spider|facebookexternalhit|preview/i.test(String(req.headers['user-agent'] || ''))) return { ok: true };
+    await q(`insert into site_events(site_id,sid,t,path,pid,src,camp,dev) values($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [s.id, sid, t, String(b.path || '').slice(0, 120), isUuid(b.pid) ? b.pid : null, String(b.src || '').slice(0, 40) || null, String(b.camp || '').slice(0, 80) || null, b.dev === 'm' ? 'm' : 'd']);
+    return { ok: true };
+  });
+  app.get('/admin/analytics', async (req, reply) => {
+    const st = await staffOf(req, reply); if (!st) return { ok: false, error: 'غير مصرّح' };
+    if (!can(st, 'reports') && !can(st, 'orders')) return fail(reply, 'غير مصرّح', 403);
+    const days = Math.max(1, Math.min(90, parseInt(req.query.days, 10) || 7)), sid = isUuid(req.query.site) ? req.query.site : null;
+    let sites = sid ? [sid] : (await q(`select id from sites`)).map(r => r.id);
+    if (st.role !== 'admin' && st.site_ids) sites = sites.filter(x => st.site_ids.includes(x));
+    const P = [sites, days], E = `site_id = any($1::uuid[]) and at > now() - make_interval(days => $2::int)`, O = `o.site_id = any($1::uuid[]) and o.created_at > now() - make_interval(days => $2::int) and s.kind<>'cancel'`;
+    const one = async (sql) => (await q(sql, P))[0];
+    const kpi = await one(`select count(distinct sid)::int visitors, count(*) filter (where t='view')::int views, count(distinct sid) filter (where t='form')::int forms,
+      count(distinct sid) filter (where dev='m')::int mob, count(distinct sid) filter (where t='order')::int ordsess from site_events where ${E}`);
+    const ok = await one(`select count(*)::int orders, coalesce(sum(o.total_jod),0)::float sales from orders o join order_statuses s on s.id=o.status_id where ${O}`);
+    const prev = await one(`select count(distinct sid)::int visitors from site_events where site_id = any($1::uuid[]) and at between now() - make_interval(days => $2::int * 2) and now() - make_interval(days => $2::int)`);
+    const daily = await q(`with d as (select (current_date - g)::date as dd from generate_series(0, $2::int - 1) as g)
+      select to_char(d.dd,'MM-DD') as "day", (select count(distinct sid) from site_events e where e.site_id = any($1::uuid[]) and e.at::date=d.dd)::int as v,
+      (select count(*) from orders o join order_statuses s on s.id=o.status_id where o.site_id = any($1::uuid[]) and o.created_at::date=d.dd and s.kind<>'cancel')::int as o from d order by d.dd`, P);
+    const prods = await q(`select p.id, p.name, coalesce(e.v,0)::int v, coalesce(e.f,0)::int f, coalesce(x.o,0)::int o, coalesce(x.s,0)::float s from products p
+      left join (select pid, count(distinct sid) filter (where t='view') v, count(distinct sid) filter (where t='form') f from site_events where ${E} and pid is not null group by pid) e on e.pid=p.id
+      left join (select i.product_id, count(distinct o.id) o, sum(i.qty*i.unit_price_jod) s from orders o join order_statuses s on s.id=o.status_id join order_items i on i.order_id=o.id where ${O} group by i.product_id) x on x.product_id=p.id
+      where p.active and (coalesce(e.v,0)+coalesce(x.o,0))>0 order by v desc, o desc limit 20`, P);
+    const srcs = await q(`with ev as (select coalesce(nullif(camp,''),nullif(src,''),'(مباشر)') k, count(distinct sid) v from site_events where ${E} group by 1),
+      od as (select coalesce(nullif(o.utm->>'campaign',''),nullif(o.utm->>'source',''),'(مباشر)') k, count(*) o, sum(o.total_jod) s from orders o join order_statuses s on s.id=o.status_id where ${O} group by 1)
+      select coalesce(ev.k,od.k) k, coalesce(ev.v,0)::int v, coalesce(od.o,0)::int o, coalesce(od.s,0)::float s from ev full join od on od.k=ev.k order by v desc nulls last limit 15`, P);
+    const dev = await q(`select dev, count(distinct sid)::int v, count(distinct sid) filter (where t='form')::int f, count(distinct sid) filter (where t='order')::int o from site_events where ${E} group by dev`, P);
+    const pages = await q(`select path, count(*)::int n from site_events where ${E} and t='view' group by path order by n desc limit 10`, P);
+    const leads = await one(`select count(*)::int n from leads where site_id = any($1::uuid[]) and created_at > now() - make_interval(days => $2::int) and not converted`);
+    return { ok: true, days, kpi: { ...kpi, ...ok, prevVisitors: prev.visitors, leads: leads.n }, daily, prods, srcs, dev, pages };
+  });
+
   // ===== التحقق من الرقم OTP (رسائل من موبايل أندرويد عبر SMS Gateway) =====
   app.post('/api/otp/send', { config: { rateLimit: { max: 5, timeWindow: '10 minutes' } } }, async (req, reply) => {
     const b = req.body || {}; const s = await siteBy(b.site); if (!s) return fail(reply, 'الموقع غير موجود', 404);

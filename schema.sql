@@ -73,6 +73,11 @@ create table wa_templates(status_id uuid primary key references order_statuses(i
 create table ad_spend(key text primary key, site_id uuid references sites(id) on delete cascade, spend_jod numeric not null default 0, updated_at timestamptz not null default now());
 create table restock_requests(id uuid primary key default gen_random_uuid(), site_id uuid not null references sites(id) on delete cascade, product_id uuid not null references products(id) on delete cascade, phone text not null, done boolean not null default false, created_at timestamptz not null default now());
 
+-- ---------- تحليل الزيارات (v1.8) ----------
+create table site_events(id bigint generated always as identity primary key, site_id uuid not null references sites(id) on delete cascade,
+  at timestamptz not null default now(), sid text not null, t text not null, path text, pid uuid, src text, camp text, dev text);
+create index site_events_site_at on site_events(site_id, at desc);
+
 -- ---------- OTP (v1.7) ----------
 create table otp_codes(id bigint generated always as identity primary key, site_id uuid not null references sites(id) on delete cascade, phone9 text not null,
   code_hash text not null, expires_at timestamptz not null, attempts int not null default 0, token text, verified_at timestamptz, failed boolean not null default false, created_at timestamptz not null default now());
@@ -98,7 +103,7 @@ create or replace function public.staff_can(perm text, sid uuid default null) re
 -- ---------- RLS ----------
 do $$ declare t text; begin
  for t in select unnest(array['currencies','payment_methods','countries','couriers','courier_secrets','governorates','country_payment_methods','order_statuses','sites','site_countries','site_currencies','design_versions',
-  'products','site_products','coupons','coupon_sites','reviews','subscribers','orders','order_items','order_status_history','order_deliveries','stock_log','notifications','settlements','otp_codes','leads','blacklist','tasks','wa_templates','ad_spend','restock_requests','staff','activity_log','integrations']) loop
+  'products','site_products','coupons','coupon_sites','reviews','subscribers','orders','order_items','order_status_history','order_deliveries','stock_log','notifications','settlements','otp_codes','site_events','leads','blacklist','tasks','wa_templates','ad_spend','restock_requests','staff','activity_log','integrations']) loop
   execute format('alter table %I enable row level security',t); end loop; end $$;
 -- قراءة عامة (الزوار)
 create policy pub_cur on currencies for select to anon,authenticated using(true);
